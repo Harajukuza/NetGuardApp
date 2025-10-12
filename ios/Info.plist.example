@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>NetGuard</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+
+    <!-- Background Modes Configuration -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <!-- Enable background fetch -->
+        <string>fetch</string>
+        <!-- Enable background processing -->
+        <string>processing</string>
+        <!-- Enable remote notifications (if using push) -->
+        <string>remote-notification</string>
+    </array>
+
+    <!-- Background Task Identifiers for iOS 13+ -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.netguard.monitor</string>
+        <string>com.netguard.refresh</string>
+        <string>com.transistorsoft.fetch</string>
+    </array>
+
+    <!-- App Transport Security Settings -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- Allow arbitrary loads for testing (disable in production) -->
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <!-- Exception domains for specific hosts -->
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+
+    <!-- Privacy - User Notifications -->
+    <key>NSUserNotificationUsageDescription</key>
+    <string>NetGuard needs to send notifications about URL monitoring status</string>
+
+    <!-- URL Schemes for deep linking -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>netguard</string>
+            </array>
+            <key>CFBundleURLName</key>
+            <string>com.netguard.app</string>
+        </dict>
+    </array>
+
+    <!-- Launch Screen -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+
+    <!-- Required device capabilities -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>armv7</string>
+    </array>
+
+    <!-- Supported interface orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- iPad specific orientations -->
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- Status bar configuration -->
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+
+    <!-- iTunes File Sharing (optional) -->
+    <key>UIFileSharingEnabled</key>
+    <false/>
+
+    <!-- Supports opening documents in place -->
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <false/>
+
+    <!-- App uses non-exempt encryption -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+</dict>
+</plist>

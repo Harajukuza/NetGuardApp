@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Internal storage -->
+    <files-path name="files" path="." />
+
+    <!-- Cache directory -->
+    <cache-path name="cache" path="." />
+
+    <!-- External storage -->
+    <external-path name="external" path="." />
+
+    <!-- External cache -->
+    <external-cache-path name="external_cache" path="." />
+
+    <!-- External files -->
+    <external-files-path name="external_files" path="." />
+
+    <!-- Logs directory -->
+    <files-path name="logs" path="logs/" />
+
+    <!-- Debug files -->
+    <files-path name="debug" path="debug/" />
+</paths>

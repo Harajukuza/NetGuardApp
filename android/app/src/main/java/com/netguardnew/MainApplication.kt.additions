@@ -1,0 +1,25 @@
+// Add these imports to your MainApplication.kt file:
+
+import com.netguardnew.backgroundservice.BackgroundServicePackage
+
+// In the getPackages() method, add:
+
+override fun getReactNativeHost(): ReactNativeHost =
+    object : ReactNativeHost(this) {
+        override fun getPackages(): List<ReactPackage> =
+            PackageList(this).packages.apply {
+                // Add the BackgroundServicePackage
+                add(BackgroundServicePackage())
+
+                // Existing packages remain unchanged
+                // add(MainReactPackage())
+                // add(other packages...)
+            }
+
+        override fun getJSMainModuleName(): String = "index"
+
+        override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
+
+        override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
+        override val isHermesEnabled: Boolean = BuildConfig.IS_HERMES_ENABLED
+    }
