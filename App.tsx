@@ -1,11 +1,13 @@
 /**
- * URL Monitoring App - Enhanced Version with Native Background Service
+ * URL Monitoring App - Enhanced Version with Auto-Sync Scheduler
  * Features:
+ * - True background auto-sync without app interaction
  * - Enhanced background service with native Android integration
  * - Improved stability and reliability
  * - Better error handling and recovery mechanisms
  * - Native callback handling for better performance
  * - Advanced statistics and monitoring
+ * - Automatic URL discovery and updates
  */
 
 import React, {
@@ -48,6 +50,13 @@ import EnhancedBackgroundService, {
   BackgroundServiceStats,
   URLCheckResult,
 } from './EnhancedBackgroundService';
+import ApiSyncManager, {
+  APIURLItem,
+  SyncStats,
+  SyncNotification,
+  apiSyncManager,
+} from './ApiSyncManager';
+import AutoSyncScheduler, { autoSyncScheduler } from './AutoSyncScheduler';
 
 // Native module for Android background service
 const { BackgroundServiceModule } = NativeModules;
@@ -62,6 +71,9 @@ const STORAGE_KEYS = {
   AUTO_CHECK_ENABLED: '@Enhanced:autoCheckEnabled',
   API_ENDPOINT: '@Enhanced:apiEndpoint',
   SERVICE_CONFIG: '@Enhanced:serviceConfig',
+  API_AUTO_REFRESH: '@Enhanced:apiAutoRefresh',
+  API_REFRESH_MINUTES: '@Enhanced:apiRefreshMinutes',
+  AUTO_SYNC_SCHEDULER_ENABLED: '@Enhanced:autoSyncSchedulerEnabled',
 };
 
 const REQUEST_TIMEOUT = 30000;
@@ -102,15 +114,7 @@ interface CallbackHistory {
   inactiveCount: number;
 }
 
-interface APIURLItem {
-  id: number;
-  callback_name: string;
-  url: string;
-  callback_url: string;
-  is_active: number;
-  created_at: string;
-  updated_at: string;
-}
+// APIURLItem is now imported from ApiSyncManager
 
 interface APIResponse {
   status: string;
@@ -190,6 +194,23 @@ function AppContent() {
   const [selectedCallbackName, setSelectedCallbackName] = useState<string>('');
   const [isLoadingAPI, setIsLoadingAPI] = useState(false);
 
+  // Enhanced API sync states
+  const [apiSyncStats, setApiSyncStats] = useState<SyncStats>({
+    totalSyncs: 0,
+    successfulSyncs: 0,
+    failedSyncs: 0,
+    lastSyncTime: null,
+    lastSuccessTime: null,
+    consecutiveFailures: 0,
+    totalUrlsFound: 0,
+    totalNewUrls: 0,
+    averageSyncDuration: 0,
+    dataIntegrityChecks: 0,
+  });
+  const [apiNotifications, setApiNotifications] = useState<SyncNotification[]>(
+    [],
+  );
+
   // Native service states
   const [useNativeService, setUseNativeService] = useState(
     Platform.OS === 'android',
@@ -206,6 +227,19 @@ function AppContent() {
   const [showServiceLogs, setShowServiceLogs] = useState(false);
   const [lastResults, setLastResults] = useState<URLCheckResult[]>([]);
 
+  // เพิ่ม state สำหรับ API auto refresh และ Auto Sync Scheduler
+  const [apiAutoRefresh, setApiAutoRefresh] = useState(false);
+  const [apiRefreshMinutes, setApiRefreshMinutes] = useState(30); // ค่าเริ่มต้น 30 นาที
+  const apiTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto Sync Scheduler states
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false); // User's preference
+  const [isSchedulerRunning, setIsSchedulerRunning] = useState(false); // Live status
+  const [schedulerStatus, setSchedulerStatus] = useState<any>(null);
+  const [schedulerNotifications, setSchedulerNotifications] = useState<any[]>(
+    [],
+  );
+
   // Memoized sorted URLs for performance
   const sortedUrls = useMemo(() => {
     return [...urls].sort((a, b) => {
@@ -215,6 +249,136 @@ function AppContent() {
       return aOrder - bOrder;
     });
   }, [urls]);
+
+  useEffect(() => {
+    const initializeScheduler = async () => {
+      try {
+        const status = autoSyncScheduler.getStatus();
+        setSchedulerStatus(status);
+        setIsSchedulerRunning(status.state.isRunning);
+
+        // Load scheduler notifications
+        const notifications = autoSyncScheduler.getNotifications();
+        setSchedulerNotifications(notifications);
+      } catch (error) {
+        console.error('Error initializing scheduler:', error);
+      }
+    };
+
+    initializeScheduler();
+
+    // Refresh scheduler status every 30 seconds
+    const statusInterval = setInterval(async () => {
+      const status = autoSyncScheduler.getStatus();
+      setSchedulerStatus(status);
+      setIsSchedulerRunning(status.state.isRunning);
+
+      const notifications = autoSyncScheduler.getNotifications();
+      setSchedulerNotifications(notifications);
+    }, 30000);
+
+    return () => clearInterval(statusInterval);
+  }, []);
+
+  // Simple API auto refresh (ทำงานแค่เมื่อแอพเปิดอยู่) - Fallback for non-scheduler mode
+  useEffect(() => {
+    if (
+      apiAutoRefresh &&
+      apiEndpoint &&
+      AppState.currentState === 'active' &&
+      !isSchedulerRunning
+    ) {
+      console.log(
+        `Starting API auto refresh every ${apiRefreshMinutes} minutes`,
+      );
+
+      // ฟังก์ชัน refresh แบบเงียบๆ
+      const quietRefresh = async () => {
+        try {
+          console.log('Auto refreshing API data...');
+
+          // Use ApiSyncManager for auto refresh
+          const result = await apiSyncManager.performManualSync();
+
+          if (result.success && result.newData) {
+            const previousCount = apiData.length;
+            const newCount = result.newData.length;
+
+            setApiData(result.newData);
+            const uniqueCallbackNames = [
+              ...new Set(result.newData.map(item => item.callback_name)),
+            ];
+            setApiCallbackNames(uniqueCallbackNames);
+
+            // แสดงแจ้งเตือนเฉพาะเมื่อมีข้อมูลใหม่
+            if (result.addedUrls.length > 0) {
+              Alert.alert(
+                '🆕 New URLs Found!',
+                `Found ${result.addedUrls.length} new URLs from API`,
+                [{ text: 'OK', style: 'default' }],
+              );
+            }
+
+            console.log(
+              `Enhanced API refreshed: ${newCount} URLs (${result.addedUrls.length} new, ${result.modifiedUrls.length} modified, ${result.removedUrls.length} removed)`,
+            );
+
+            // Update stats
+            setApiSyncStats(apiSyncManager.getStats());
+          }
+        } catch (error) {
+          console.log('Enhanced auto refresh failed (silent):', error);
+        }
+      };
+
+      // เริ่ม timer only if scheduler is not active
+      apiTimerRef.current = setInterval(
+        quietRefresh,
+        apiRefreshMinutes * 60 * 1000,
+      );
+
+      // Cleanup function
+      return () => {
+        if (apiTimerRef.current) {
+          clearInterval(apiTimerRef.current);
+          apiTimerRef.current = null;
+          console.log('API auto refresh timer stopped');
+        }
+      };
+    } else {
+      // ปิด timer เมื่อไม่ต้องการ
+      if (apiTimerRef.current) {
+        clearInterval(apiTimerRef.current);
+        apiTimerRef.current = null;
+      }
+    }
+  }, [
+    apiAutoRefresh,
+    apiEndpoint,
+    apiRefreshMinutes,
+    AppState.currentState,
+    autoSyncEnabled,
+  ]);
+
+  // หยุด timer เมื่อแอพไปอยู่ background
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState !== 'active' && apiTimerRef.current) {
+        console.log('App going background - pausing API refresh timer');
+        clearInterval(apiTimerRef.current);
+        apiTimerRef.current = null;
+      } else if (nextAppState === 'active' && apiAutoRefresh && apiEndpoint) {
+        console.log('App active again - resuming API refresh timer');
+        // Timer จะเริ่มใหม่จาก useEffect ด้านบน
+      }
+    };
+
+    const subscription = AppState.addEventListener(
+      'change',
+      handleAppStateChange,
+    );
+    return () => subscription?.remove();
+  }, [apiAutoRefresh, apiEndpoint]);
 
   // Initialize app and setup listeners
   useEffect(() => {
@@ -284,6 +448,12 @@ function AppContent() {
           console.log('App returned to foreground - refreshing service status');
           refreshServiceStatus();
           refreshNetworkInfo();
+
+          // Check for new API data from background sync
+          checkForNewApiDataFromBackground();
+
+          // Update API sync stats
+          refreshApiSyncStats();
         }
 
         appState.current = nextAppState;
@@ -383,6 +553,9 @@ function AppContent() {
         savedLastCallback,
         savedLastCheck,
         savedApiEndpoint,
+        savedApiAutoRefresh,
+        savedApiRefreshMinutes,
+        savedAutoSyncSchedulerEnabled,
       ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.URLS),
         AsyncStorage.getItem(STORAGE_KEYS.CALLBACK),
@@ -390,6 +563,9 @@ function AppContent() {
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CALLBACK),
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CHECK_TIME),
         AsyncStorage.getItem(STORAGE_KEYS.API_ENDPOINT),
+        AsyncStorage.getItem(STORAGE_KEYS.API_AUTO_REFRESH),
+        AsyncStorage.getItem(STORAGE_KEYS.API_REFRESH_MINUTES),
+        AsyncStorage.getItem(STORAGE_KEYS.AUTO_SYNC_SCHEDULER_ENABLED),
       ]);
 
       if (savedUrls) {
@@ -421,6 +597,12 @@ function AppContent() {
       if (savedLastCheck) {
         setLastCheckTime(new Date(savedLastCheck));
       }
+      if (savedApiAutoRefresh)
+        setApiAutoRefresh(JSON.parse(savedApiAutoRefresh));
+      if (savedApiRefreshMinutes)
+        setApiRefreshMinutes(parseInt(savedApiRefreshMinutes, 10));
+      if (savedAutoSyncSchedulerEnabled)
+        setAutoSyncEnabled(JSON.parse(savedAutoSyncSchedulerEnabled));
     } catch (error) {
       console.error('Error loading saved data:', error);
     }
@@ -436,6 +618,20 @@ function AppContent() {
         ),
         AsyncStorage.setItem(STORAGE_KEYS.INTERVAL, checkInterval),
         AsyncStorage.setItem(STORAGE_KEYS.API_ENDPOINT, apiEndpoint),
+        AsyncStorage.setItem(
+          STORAGE_KEYS.API_AUTO_REFRESH,
+          JSON.stringify(apiAutoRefresh),
+        ),
+        AsyncStorage.setItem(
+          STORAGE_KEYS.API_REFRESH_MINUTES,
+          apiRefreshMinutes.toString(),
+        ),
+        AsyncStorage.setItem(
+          STORAGE_KEYS.AUTO_SYNC_SCHEDULER_ENABLED,
+          JSON.stringify(autoSyncEnabled),
+        ),
+        // Also save API endpoint for background sync
+        AsyncStorage.setItem('@Enhanced:apiEndpoint', apiEndpoint),
       ]);
 
       if (lastCheckTime) {
@@ -447,7 +643,15 @@ function AppContent() {
     } catch (error) {
       console.error('Error saving data:', error);
     }
-  }, [urls, callbackConfig, checkInterval, apiEndpoint, lastCheckTime]);
+  }, [
+    urls,
+    callbackConfig,
+    checkInterval,
+    apiEndpoint,
+    apiAutoRefresh,
+    apiRefreshMinutes,
+    autoSyncEnabled,
+  ]);
 
   // Save data when state changes (debounced)
   useEffect(() => {
@@ -555,6 +759,7 @@ function AppContent() {
   const refreshServiceStatus = async () => {
     try {
       await loadServiceStats();
+      await refreshApiSyncStats();
 
       const logs = await backgroundService.getServiceLogs();
       setServiceLogs(logs.slice(-20)); // Keep last 20 logs
@@ -670,6 +875,16 @@ function AppContent() {
       setIsEnhancedServiceRunning(false);
       await loadServiceStats();
 
+      // Clear API sync stats when stopping service
+      setApiSyncStats({
+        lastSyncTime: null,
+        totalSyncs: 0,
+        newUrlsFound: 0,
+      });
+
+      // Clear any pending API notifications
+      await AsyncStorage.removeItem('@Enhanced:hasNewApiData');
+
       Alert.alert(
         'Enhanced Background Service Stopped',
         'URL monitoring has been stopped.',
@@ -763,6 +978,18 @@ function AppContent() {
                 isRunning: false,
               });
 
+              // Clear API sync stats and background data
+              setApiSyncStats({
+                lastSyncTime: null,
+                totalSyncs: 0,
+                newUrlsFound: 0,
+              });
+              await AsyncStorage.multiRemove([
+                '@Enhanced:apiDataBackgroundSync',
+                '@Enhanced:hasNewApiData',
+                '@Enhanced:apiEndpoint',
+              ]);
+
               Alert.alert('Success', 'All data cleared');
             } catch (error) {
               Alert.alert('Error', 'Failed to clear data');
@@ -829,7 +1056,7 @@ function AppContent() {
     }
   };
 
-  // API integration functions
+  // Enhanced API integration functions using ApiSyncManager
   const loadFromAPI = async () => {
     if (!apiEndpoint) {
       Alert.alert('Error', 'Please enter API endpoint URL');
@@ -838,29 +1065,47 @@ function AppContent() {
 
     setIsLoadingAPI(true);
     try {
-      const response = await fetch(apiEndpoint, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
+      // Configure ApiSyncManager with flexible validation for URL monitoring
+      await apiSyncManager.configure({
+        apiEndpoint: apiEndpoint,
+        autoSyncEnabled: apiAutoRefresh,
+        syncInterval: apiRefreshMinutes * 60 * 1000,
+        strictValidation: false, // Use flexible validation for URL monitoring
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      // Enable flexible validation mode for URL monitoring scenarios
+      await apiSyncManager.setStrictValidation(false);
 
-      const data: APIResponse = await response.json();
+      // Perform sync
+      const result = await apiSyncManager.performManualSync();
 
-      if (data.status === 'success' && data.data) {
-        setApiData(data.data);
+      if (result.success && result.newData) {
+        setApiData(result.newData);
         const uniqueCallbackNames = [
-          ...new Set(data.data.map(item => item.callback_name)),
+          ...new Set(result.newData.map(item => item.callback_name)),
         ];
         setApiCallbackNames(uniqueCallbackNames);
+
+        // Update stats
+        setApiSyncStats(apiSyncManager.getStats());
+
+        const changeMessage = [];
+        if (result.addedUrls.length > 0)
+          changeMessage.push(`${result.addedUrls.length} new`);
+        if (result.modifiedUrls.length > 0)
+          changeMessage.push(`${result.modifiedUrls.length} modified`);
+        if (result.removedUrls.length > 0)
+          changeMessage.push(`${result.removedUrls.length} removed`);
+
         Alert.alert(
           'Success',
-          `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
+          `Loaded ${result.newData.length} URLs from ${uniqueCallbackNames.length} callback configurations` +
+            (changeMessage.length > 0
+              ? `\n\nChanges: ${changeMessage.join(', ')}`
+              : ''),
         );
       } else {
-        throw new Error('Invalid API response format');
+        throw new Error(result.error || 'Sync failed');
       }
     } catch (error: any) {
       Alert.alert('Error', `Failed to load from API: ${error.message}`);
@@ -947,6 +1192,178 @@ function AppContent() {
     }
   };
 
+  // Enhanced check for new API data from background sync
+  const checkForNewApiDataFromBackground = async () => {
+    try {
+      // Check ApiSyncManager notifications
+      const notifications = await apiSyncManager.getPendingNotifications();
+      const unacknowledged = notifications.filter(n => !n.acknowledged);
+
+      if (unacknowledged.length > 0) {
+        setApiNotifications(notifications);
+
+        const newUrlNotifications = unacknowledged.filter(
+          n => n.type === 'new_urls',
+        );
+        if (newUrlNotifications.length > 0) {
+          const notification = newUrlNotifications[0];
+          Alert.alert(
+            notification.title,
+            notification.message +
+              `\n\nTotal changes found: ${unacknowledged.length}`,
+            [
+              {
+                text: 'Load Now',
+                onPress: async () => {
+                  await loadFromAPI();
+                  await apiSyncManager.acknowledgeNotification(notification.id);
+                },
+              },
+              {
+                text: 'Later',
+                style: 'cancel',
+                onPress: () => {
+                  apiSyncManager.acknowledgeNotification(notification.id);
+                },
+              },
+            ],
+          );
+        }
+      }
+
+      // Also sync the latest API data if available
+      const syncedData = await apiSyncManager.getLatestSyncedData();
+      if (syncedData && syncedData.data && apiEndpoint) {
+        // Update silently without alert
+        setApiData(syncedData.data);
+        const uniqueCallbackNames = [
+          ...new Set(syncedData.data.map(item => item.callback_name)),
+        ];
+        setApiCallbackNames(uniqueCallbackNames);
+        console.log('Enhanced background synced API data loaded silently');
+      }
+    } catch (error) {
+      console.error('Error checking enhanced background API data:', error);
+    }
+  };
+
+  // Auto Sync Scheduler functions
+  const startAutoSyncScheduler = async (silent = false) => {
+    try {
+      if (!apiEndpoint) {
+        if (!silent) {
+          Alert.alert('Error', 'Please configure API endpoint first');
+        }
+        // If silent (auto-start), we can't proceed. Turn the setting off.
+        if (silent) {
+          setAutoSyncEnabled(false);
+        }
+        return;
+      }
+
+      console.log('Configuring and starting Auto-Sync Scheduler...');
+      // Configure scheduler
+      await autoSyncScheduler.configure({
+        enabled: true,
+        apiEndpoint: apiEndpoint,
+        selectedCallbackName: selectedCallbackName,
+        syncInterval: 30 * 60 * 1000, // 30 minutes
+        urlCheckInterval: 10 * 60 * 1000, // 10 minutes
+        autoUpdateUrls: true,
+        callbackConfig: callbackConfig,
+      });
+
+      // Start scheduler
+      const started = await autoSyncScheduler.startScheduler();
+
+      if (started) {
+        console.log('Auto-Sync Scheduler started successfully.');
+        if (!silent) {
+          Alert.alert(
+            '🚀 Auto-Sync Scheduler Started',
+            'Background URL monitoring is now active!\n\n' +
+              '✅ Automatic API sync every 30 minutes\n' +
+              '🔍 URL change detection every 10 minutes\n' +
+              '📱 Works completely in background\n' +
+              '🔔 Automatic notifications for new URLs',
+            [{ text: 'OK' }],
+          );
+        }
+      } else {
+        console.error('Failed to start auto-sync scheduler.');
+        if (!silent) {
+          Alert.alert('Error', 'Failed to start auto-sync scheduler');
+        }
+      }
+    } catch (error: any) {
+      console.error('Error starting scheduler:', error);
+      if (!silent) {
+        Alert.alert('Error', `Failed to start scheduler: ${error.message}`);
+      }
+    }
+  };
+
+  const stopAutoSyncScheduler = async (silent = false) => {
+    try {
+      console.log('Stopping Auto-Sync Scheduler...');
+      await autoSyncScheduler.stopScheduler();
+      console.log('Auto-Sync Scheduler stopped.');
+      if (!silent) {
+        Alert.alert(
+          'Auto-Sync Stopped',
+          'Background monitoring has been stopped',
+        );
+      }
+    } catch (error: any) {
+      console.error('Error stopping scheduler:', error);
+      if (!silent) {
+        Alert.alert('Error', `Failed to stop scheduler: ${error.message}`);
+      }
+    }
+  };
+
+  // This effect controls the scheduler's lifecycle based on the user's preference.
+  useEffect(() => {
+    // Don't run on the very first render before settings are loaded.
+    if (isInitialMount.current) {
+      return;
+    }
+
+    const controlScheduler = async () => {
+      if (autoSyncEnabled) {
+        // User wants it on
+        await startAutoSyncScheduler(true); // Start silently
+      } else {
+        // User wants it off
+        await stopAutoSyncScheduler(true); // Stop silently
+      }
+    };
+
+    controlScheduler();
+  }, [autoSyncEnabled, apiEndpoint]); // Re-run if the setting or API endpoint changes.
+
+  const toggleAutoSyncScheduler = (enable: boolean) => {
+    // This now simply updates the user's preference. The useEffect above handles the rest.
+    setAutoSyncEnabled(enable);
+  };
+
+  // Refresh API sync stats
+  const refreshApiSyncStats = async () => {
+    try {
+      const stats = apiSyncManager.getStats();
+      setApiSyncStats(stats);
+
+      const notifications = await apiSyncManager.getPendingNotifications();
+      setApiNotifications(notifications);
+
+      // Also refresh scheduler status
+      const schedulerStatus = autoSyncScheduler.getStatus();
+      setSchedulerStatus(schedulerStatus);
+    } catch (error) {
+      console.error('Error refreshing API sync stats:', error);
+    }
+  };
+
   // Styling
   const containerStyle = {
     ...styles.container,
@@ -977,6 +1394,59 @@ function AppContent() {
           {lastCheckTime && (
             <Text style={[styles.lastCheckText, textStyle]}>
               Last check: {formatTimeAgo(lastCheckTime)}
+            </Text>
+          )}
+        </View>
+
+        {/* Auto-Sync Scheduler Status */}
+        <View
+          style={[
+            cardStyle,
+            autoSyncEnabled
+              ? styles.serviceActiveCard
+              : styles.serviceInactiveCard,
+          ]}
+        >
+          <View style={styles.serviceHeader}>
+            <Text style={[styles.serviceTitle, textStyle]}>
+              {isSchedulerRunning
+                ? '🚀 Auto-Sync Scheduler Active'
+                : '⏸️ Auto-Sync Scheduler Stopped'}
+            </Text>
+            <Switch
+              value={autoSyncEnabled}
+              onValueChange={toggleAutoSyncScheduler}
+              trackColor={{ false: '#767577', true: '#4CAF50' }}
+              thumbColor={autoSyncEnabled ? '#4CAF50' : '#f4f3f4'}
+            />
+          </View>
+
+          {isSchedulerRunning && schedulerStatus && (
+            <>
+              <Text style={[styles.serviceDescription, textStyle]}>
+                True background sync every 30min • URL detection every 10min
+              </Text>
+              <Text style={[styles.serviceUptime, textStyle]}>
+                Uptime: {formatUptime(schedulerStatus.stats.uptime)}
+              </Text>
+              {schedulerStatus.state.lastSyncTime && (
+                <Text style={[styles.serviceUptime, textStyle]}>
+                  Last sync:{' '}
+                  {formatTimeAgo(new Date(schedulerStatus.state.lastSyncTime))}
+                </Text>
+              )}
+              {schedulerNotifications.length > 0 && (
+                <Text style={[styles.countdownText, textStyle]}>
+                  {schedulerNotifications.length} pending notifications
+                </Text>
+              )}
+            </>
+          )}
+
+          {!autoSyncEnabled && (
+            <Text style={[styles.serviceDescription, textStyle]}>
+              Enable for automatic background URL monitoring without app
+              interaction
             </Text>
           )}
         </View>
@@ -1057,6 +1527,75 @@ function AppContent() {
               <Text style={[styles.lastServiceCheck, textStyle]}>
                 Last background check: {serviceStats.lastCheckTime}
               </Text>
+            )}
+
+            {/* Enhanced API Sync Statistics */}
+            {(apiSyncStats.lastSyncTime || isEnhancedServiceRunning) && (
+              <View style={styles.apiSyncSection}>
+                <Text style={[styles.apiSyncTitle, textStyle]}>
+                  📡 Enhanced API Sync
+                </Text>
+                {apiSyncStats.lastSyncTime && (
+                  <Text style={[styles.apiSyncText, textStyle]}>
+                    Last sync:{' '}
+                    {formatTimeAgo(new Date(apiSyncStats.lastSyncTime))}
+                  </Text>
+                )}
+                {apiSyncStats.lastSuccessTime && (
+                  <Text style={[styles.apiSyncText, textStyle]}>
+                    Last success:{' '}
+                    {formatTimeAgo(new Date(apiSyncStats.lastSuccessTime))}
+                  </Text>
+                )}
+                <View style={styles.apiSyncStatsRow}>
+                  <Text style={[styles.apiSyncText, textStyle]}>
+                    ✅ {apiSyncStats.successfulSyncs}/{apiSyncStats.totalSyncs}{' '}
+                    syncs
+                  </Text>
+                  <Text style={[styles.apiSyncText, textStyle]}>
+                    🔍 {apiSyncStats.dataIntegrityChecks} integrity checks
+                  </Text>
+                </View>
+                {apiSyncStats.totalNewUrls > 0 && (
+                  <Text
+                    style={[
+                      styles.apiSyncText,
+                      textStyle,
+                      { color: '#4CAF50' },
+                    ]}
+                  >
+                    🆕 {apiSyncStats.totalNewUrls} new URLs discovered
+                  </Text>
+                )}
+                {apiSyncStats.consecutiveFailures > 0 && (
+                  <Text
+                    style={[
+                      styles.apiSyncText,
+                      textStyle,
+                      { color: '#F44336' },
+                    ]}
+                  >
+                    ⚠️ {apiSyncStats.consecutiveFailures} consecutive failures
+                  </Text>
+                )}
+                {apiNotifications.length > 0 && (
+                  <Text
+                    style={[
+                      styles.apiSyncText,
+                      textStyle,
+                      { color: '#FF9800' },
+                    ]}
+                  >
+                    🔔 {apiNotifications.filter(n => !n.acknowledged).length}{' '}
+                    pending notifications
+                  </Text>
+                )}
+                {isEnhancedServiceRunning && (
+                  <Text style={[styles.apiSyncText, textStyle]}>
+                    📅 Auto sync: every 30 minutes with retry logic
+                  </Text>
+                )}
+              </View>
             )}
           </View>
         )}
@@ -1158,7 +1697,7 @@ function AppContent() {
               {isLoadingAPI ? (
                 <ActivityIndicator color="white" size="small" />
               ) : (
-                <Text style={styles.buttonText}>Load from API</Text>
+                <Text style={styles.buttonText}>🔄 Load from API</Text>
               )}
             </TouchableOpacity>
 
@@ -1173,6 +1712,141 @@ function AppContent() {
               </TouchableOpacity>
             )}
           </View>
+
+          {/* Auto-Sync Scheduler Settings */}
+          <View
+            style={[
+              styles.autoRefreshSection,
+              {
+                marginTop: 16,
+                backgroundColor: autoSyncEnabled
+                  ? 'rgba(76, 175, 80, 0.1)'
+                  : 'rgba(224, 224, 224, 0.5)',
+              },
+            ]}
+          >
+            <View style={styles.toggleRow}>
+              <Text style={[styles.toggleLabel, textStyle]}>
+                🚀 Auto-Sync Scheduler (Recommended)
+              </Text>
+              <Switch
+                value={autoSyncEnabled}
+                onValueChange={toggleAutoSyncScheduler}
+                trackColor={{ false: '#767577', true: '#4CAF50' }}
+                thumbColor={autoSyncEnabled ? '#4CAF50' : '#f4f3f4'}
+              />
+            </View>
+
+            <View style={styles.enhancedSyncFeatures}>
+              <Text style={[styles.autoRefreshNote, textStyle]}>
+                🌟 True Background Features:
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • Works 100% in background without app interaction
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • Automatic URL discovery and updates every 10min
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • Full API sync every 30 minutes
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • Auto-restart and health monitoring
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • Smart notifications for new URLs
+              </Text>
+              <Text style={[styles.featureText, textStyle]}>
+                • No need to open app for sync operations
+              </Text>
+            </View>
+          </View>
+
+          {/* Enhanced Auto Sync Settings (Fallback) */}
+          {!autoSyncEnabled && (
+            <View style={[styles.autoRefreshSection, { marginTop: 16 }]}>
+              <View style={styles.toggleRow}>
+                <Text style={[styles.toggleLabel, textStyle]}>
+                  🕐 Fallback Auto Sync (App Active Only)
+                </Text>
+                <Switch
+                  value={apiAutoRefresh}
+                  onValueChange={async value => {
+                    setApiAutoRefresh(value);
+                    try {
+                      if (value && apiEndpoint) {
+                        await apiSyncManager.configure({
+                          apiEndpoint: apiEndpoint,
+                          autoSyncEnabled: value,
+                          syncInterval: apiRefreshMinutes * 60 * 1000,
+                          strictValidation: false, // Flexible validation for URL monitoring
+                        });
+                        await apiSyncManager.setStrictValidation(false);
+                        await apiSyncManager.startAutoSync();
+                      } else {
+                        apiSyncManager.stopAutoSync();
+                      }
+                    } catch (error) {
+                      console.error('Failed to toggle API sync:', error);
+                    }
+                  }}
+                  trackColor={{ false: '#767577', true: '#81b0ff' }}
+                  thumbColor={apiAutoRefresh ? '#2196F3' : '#f4f3f4'}
+                />
+              </View>
+
+              {apiAutoRefresh && (
+                <View style={styles.inputRow}>
+                  <Text style={[styles.intervalLabel, textStyle]}>Every</Text>
+                  <TextInput
+                    style={[inputStyle, styles.smallInput]}
+                    value={apiRefreshMinutes.toString()}
+                    onChangeText={async text => {
+                      const minutes = parseInt(text) || 5;
+                      setApiRefreshMinutes(minutes);
+                      if (apiAutoRefresh && apiEndpoint) {
+                        try {
+                          await apiSyncManager.configure({
+                            apiEndpoint: apiEndpoint,
+                            syncInterval: minutes * 60 * 1000,
+                            strictValidation: false, // Maintain flexible validation
+                          });
+                        } catch (error) {
+                          console.error(
+                            'Failed to update sync interval:',
+                            error,
+                          );
+                        }
+                      }
+                    }}
+                    keyboardType="numeric"
+                    placeholder="30"
+                  />
+                  <Text style={[styles.intervalLabel, textStyle]}>minutes</Text>
+                </View>
+              )}
+
+              {apiAutoRefresh && (
+                <View style={styles.enhancedSyncFeatures}>
+                  <Text style={[styles.autoRefreshNote, textStyle]}>
+                    ⚠️ Limited features (app must be active):
+                  </Text>
+                  <Text style={[styles.featureText, textStyle]}>
+                    • Works only when app is open/active
+                  </Text>
+                  <Text style={[styles.featureText, textStyle]}>
+                    • Flexible data validation for URL monitoring
+                  </Text>
+                  <Text style={[styles.featureText, textStyle]}>
+                    • Automatic retry with exponential backoff
+                  </Text>
+                  <Text style={[styles.featureText, textStyle]}>
+                    • Smart change detection and notifications
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
 
           {selectedCallbackName && (
             <Text style={[styles.selectedCallbackText, textStyle]}>
@@ -1653,6 +2327,12 @@ const styles = StyleSheet.create({
     marginTop: 8,
     textAlign: 'center',
   },
+  autoRefreshSection: {
+    backgroundColor: 'rgba(33, 150, 243, 0.1)',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+  },
   toggleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1663,6 +2343,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     flex: 1,
     marginRight: 12,
+  },
+  intervalLabel: {
+    fontSize: 16,
+    marginHorizontal: 8,
+  },
+  smallInput: {
+    width: 60,
+    textAlign: 'center',
+  },
+  autoRefreshNote: {
+    fontSize: 12,
+    opacity: 0.7,
+    fontStyle: 'italic',
+    marginTop: 4,
   },
   toggleDescription: {
     fontSize: 12,
@@ -1964,6 +2658,36 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 16,
     fontWeight: '600',
+  },
+  apiSyncSection: {
+    marginTop: 12,
+    padding: 10,
+    backgroundColor: 'rgba(156, 39, 176, 0.1)',
+    borderRadius: 8,
+  },
+  apiSyncTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  apiSyncText: {
+    fontSize: 12,
+    marginBottom: 2,
+    opacity: 0.8,
+  },
+  apiSyncStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginVertical: 2,
+  },
+  enhancedSyncFeatures: {
+    marginTop: 8,
+    paddingLeft: 12,
+  },
+  featureText: {
+    fontSize: 11,
+    marginBottom: 1,
+    opacity: 0.7,
   },
 });
 

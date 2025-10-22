@@ -13,6 +13,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 import BackgroundJob from 'react-native-background-actions';
+import ApiSyncManager, { APIURLItem, apiSyncManager } from './ApiSyncManager';
 
 interface URLCheckResult {
   url: string;
@@ -218,6 +219,11 @@ class EnhancedBackgroundService {
   }
 
   async startService(config: BackgroundServiceConfig): Promise<boolean> {
+    if (!config) {
+      this.log('startService called with a null config. Aborting.', new Error());
+      return false;
+    }
+
     try {
       this.log('Starting enhanced background service', config);
 
@@ -304,9 +310,34 @@ class EnhancedBackgroundService {
     const intervalMs = config.intervalMinutes * 60 * 1000;
     let consecutiveErrors = 0;
     const maxConsecutiveErrors = 5;
+    let lastApiSync = 0;
+    let lastUrlCheck = 0;
+    const apiSyncInterval = 30 * 60 * 1000; // Sync API every 30 minutes
+    const urlCheckInterval = 10 * 60 * 1000; // Check for URL changes every 10 minutes
 
     while (BackgroundJob.isRunning()) {
       try {
+        const now = Date.now();
+
+        // Sync API data periodically in background using ApiSyncManager
+        if (now - lastApiSync > apiSyncInterval) {
+          await this.performBackgroundApiSync();
+          lastApiSync = now;
+        }
+
+        // Check for URL configuration changes more frequently
+        if (now - lastUrlCheck > urlCheckInterval) {
+          const hasNewUrls = await this.checkForNewUrlsFromApi();
+          if (hasNewUrls) {
+            this.log('New URLs detected, updating service configuration');
+            await this.updateServiceConfigurationFromApi();
+            // Reset URL check timer to avoid immediate re-check
+            lastUrlCheck = now;
+          } else {
+            lastUrlCheck = now;
+          }
+        }
+
         this.log('Background task: Starting URL check cycle');
 
         const checkResults = await this.performURLChecks(config);
@@ -856,6 +887,302 @@ class EnhancedBackgroundService {
 
   getStats(): BackgroundServiceStats {
     return { ...this.stats, uptime: this.getUptime() };
+  }
+
+  // Enhanced Background API sync using ApiSyncManager
+  private async performBackgroundApiSync() {
+    try {
+      this.log('Background API sync: Starting enhanced sync');
+
+      // Check if API sync is configured
+      const config = apiSyncManager.getConfiguration();
+      if (!config.apiEndpoint) {
+        this.log('Background API sync: No endpoint configured');
+        return;
+      }
+
+      // Perform sync using ApiSyncManager
+      const result = await apiSyncManager.performManualSync();
+
+      if (result.success) {
+        this.log(`Background API sync completed: ${result.newCount} URLs`, {
+          previousCount: result.previousCount,
+          newCount: result.newCount,
+          addedUrls: result.addedUrls.length,
+          modifiedUrls: result.modifiedUrls.length,
+          removedUrls: result.removedUrls.length,
+          syncDuration: result.syncDuration,
+          dataChecksum: result.dataChecksum,
+        });
+
+        // Store legacy format for backward compatibility
+        await AsyncStorage.setItem(
+          '@Enhanced:apiDataBackgroundSync',
+          JSON.stringify({
+            data: { status: 'success', data: result.newData },
+            timestamp: result.timestamp,
+            source: 'enhanced_background_sync',
+            previousCount: result.previousCount,
+            newCount: result.newCount,
+            hasNewData: result.addedUrls.length > 0,
+            changes: {
+              added: result.addedUrls.length,
+              modified: result.modifiedUrls.length,
+              removed: result.removedUrls.length,
+            },
+            checksum: result.dataChecksum,
+            syncDuration: result.syncDuration,
+          }),
+        );
+
+        // Create notification for new data
+        if (result.addedUrls.length > 0) {
+          await AsyncStorage.setItem(
+            '@Enhanced:hasNewApiData',
+            JSON.stringify({
+              newCount: result.addedUrls.length,
+              timestamp: result.timestamp,
+              type: 'new_urls',
+              totalUrls: result.newCount,
+              changes: {
+                added: result.addedUrls.length,
+                modified: result.modifiedUrls.length,
+                removed: result.removedUrls.length,
+              },
+            }),
+          );
+        }
+      } else {
+        this.log('Background API sync failed', result.error);
+      }
+    } catch (error: any) {
+      this.log('Background API sync error', error?.message || error);
+    }
+  }
+
+  // Enhanced method to check for new API data with detailed information
+  async checkForNewApiData() {
+    try {
+      // Check ApiSyncManager notifications first
+      const notifications = await apiSyncManager.getPendingNotifications();
+      const newUrlNotifications = notifications.filter(
+        n => n.type === 'new_urls' && !n.acknowledged,
+      );
+
+      if (newUrlNotifications.length > 0) {
+        const notification = newUrlNotifications[0];
+        await apiSyncManager.acknowledgeNotification(notification.id);
+
+        return {
+          newCount: notification.data.length,
+          timestamp: notification.timestamp,
+          type: notification.type,
+          title: notification.title,
+          message: notification.message,
+          data: notification.data,
+        };
+      }
+
+      // Fallback to legacy method
+      const legacyData = await AsyncStorage.getItem('@Enhanced:hasNewApiData');
+      if (legacyData) {
+        const data = JSON.parse(legacyData);
+        await AsyncStorage.removeItem('@Enhanced:hasNewApiData');
+        return data;
+      }
+
+      return null;
+    } catch (error) {
+      this.log('Error checking new API data', error);
+      return null;
+    }
+  }
+
+  // Enhanced method to get synced API data with integrity check
+  async getSyncedApiData() {
+    try {
+      // Try to get data from ApiSyncManager first
+      const syncedData = await apiSyncManager.getLatestSyncedData();
+      if (syncedData) {
+        return {
+          data: { status: 'success', data: syncedData.data },
+          timestamp: syncedData.timestamp,
+          source: 'api_sync_manager',
+          checksum: syncedData.checksum,
+          dataCount: syncedData.data.length,
+        };
+      }
+
+      // Fallback to legacy storage
+      const legacyData = await AsyncStorage.getItem(
+        '@Enhanced:apiDataBackgroundSync',
+      );
+      return legacyData ? JSON.parse(legacyData) : null;
+    } catch (error) {
+      this.log('Error getting synced API data', error);
+      return null;
+    }
+  }
+
+  // Get API sync statistics
+  async getApiSyncStats() {
+    try {
+      const stats = apiSyncManager.getStats();
+      const history = await apiSyncManager.getSyncHistory();
+
+      return {
+        ...stats,
+        recentHistory: history.slice(0, 5), // Last 5 sync results
+        isAutoSyncEnabled: apiSyncManager.isAutoSyncEnabled(),
+        configuration: apiSyncManager.getConfiguration(),
+      };
+    } catch (error) {
+      this.log('Error getting API sync stats', error);
+      return null;
+    }
+  }
+
+  // Get all pending API sync notifications
+  async getApiSyncNotifications() {
+    try {
+      return await apiSyncManager.getPendingNotifications();
+    } catch (error) {
+      this.log('Error getting API sync notifications', error);
+      return [];
+    }
+  }
+
+  // Initialize API sync manager with configuration
+  async initializeApiSyncManager(config: {
+    apiEndpoint: string;
+    autoSyncEnabled: boolean;
+    syncInterval?: number;
+  }) {
+    try {
+      await apiSyncManager.configure({
+        apiEndpoint: config.apiEndpoint,
+        autoSyncEnabled: config.autoSyncEnabled,
+        syncInterval: config.syncInterval || 30 * 60 * 1000, // Default 30 minutes
+      });
+
+      if (config.autoSyncEnabled) {
+        await apiSyncManager.startAutoSync();
+        this.log('API sync manager started with auto sync enabled');
+      }
+    } catch (error) {
+      this.log('Failed to initialize API sync manager', error);
+      throw error;
+    }
+  }
+
+  // Stop API sync manager
+  async stopApiSyncManager() {
+    try {
+      apiSyncManager.stopAutoSync();
+      this.log('API sync manager stopped');
+    } catch (error) {
+      this.log('Error stopping API sync manager', error);
+    }
+  }
+
+  // Check for new URLs from API without full sync
+  private async checkForNewUrlsFromApi(): Promise<boolean> {
+    try {
+      const config = apiSyncManager.getConfiguration();
+      if (!config.apiEndpoint) {
+        return false;
+      }
+
+      // Get current URL count from storage
+      const currentUrls = await AsyncStorage.getItem('@Enhanced:urls');
+      const currentCount = currentUrls ? JSON.parse(currentUrls).length : 0;
+
+      // Quick API check to see if count changed
+      const response = await fetch(config.apiEndpoint, {
+        method: 'HEAD', // Use HEAD to check without downloading full content
+        timeout: 10000,
+      });
+
+      if (!response.ok) {
+        // If HEAD doesn't work, try GET with limited data
+        const getResponse = await fetch(config.apiEndpoint, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            Range: 'bytes=0-1024', // Try to get just first 1KB
+          },
+          timeout: 10000,
+        });
+
+        if (getResponse.ok) {
+          const data = await getResponse.json();
+          const apiCount = Array.isArray(data)
+            ? data.length
+            : data.data
+            ? data.data.length
+            : 0;
+          return apiCount !== currentCount;
+        }
+      }
+
+      return false;
+    } catch (error) {
+      this.log('Error checking for new URLs', error);
+      return false;
+    }
+  }
+
+  // Update service configuration when new URLs are detected
+  private async updateServiceConfigurationFromApi(): Promise<void> {
+    try {
+      // Perform full sync to get new URLs
+      const result = await apiSyncManager.performManualSync();
+
+      if (result.success && result.newData && result.addedUrls.length > 0) {
+        // Get current service configuration
+        const currentConfig = this.currentConfig;
+
+        if (currentConfig) {
+          // Update URLs list from synced API data
+          const newUrls = result.newData
+            .map(item => item.url)
+            .filter(url => url);
+
+          // Update current configuration
+          const updatedConfig = {
+            ...currentConfig,
+            urls: newUrls,
+          };
+
+          // Save updated configuration for persistence
+          await AsyncStorage.setItem(
+            '@Enhanced:serviceConfig',
+            JSON.stringify(updatedConfig),
+          );
+
+          // Update current config in memory
+          this.currentConfig = updatedConfig;
+
+          this.log(
+            `Service configuration updated with ${newUrls.length} URLs from API sync`,
+          );
+
+          // Create notification for new URLs
+          await AsyncStorage.setItem(
+            '@Enhanced:hasNewApiData',
+            JSON.stringify({
+              newCount: result.addedUrls.length,
+              timestamp: result.timestamp,
+              type: 'background_auto_update',
+              totalUrls: newUrls.length,
+              message: `Background service automatically added ${result.addedUrls.length} new URLs`,
+            }),
+          );
+        }
+      }
+    } catch (error) {
+      this.log('Error updating service configuration from API', error);
+    }
   }
 }
 

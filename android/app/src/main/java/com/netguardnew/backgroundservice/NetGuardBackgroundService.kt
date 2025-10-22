@@ -169,10 +169,7 @@ class NetGuardBackgroundService : Service() {
                         // Perform URL checks
                         val results = performUrlChecks()
 
-                        // Send callback if configured
-                        if (callbackConfig != null && results.isNotEmpty()) {
-                            sendCallback(results)
-                        }
+                        
 
                         // Update statistics
                         totalChecks++
@@ -218,6 +215,7 @@ class NetGuardBackgroundService : Service() {
         Log.d(TAG, "🌐 Checking ${urls.size} URLs")
 
         for ((index, url) in urls.withIndex()) {
+            var result: JSONObject? = null
             try {
                 // Random delay between requests (5-30 seconds)
                 if (index > 0) {
@@ -226,7 +224,7 @@ class NetGuardBackgroundService : Service() {
                     delay(randomDelay.toLong())
                 }
 
-                val result = checkSingleUrl(url)
+                result = checkSingleUrl(url)
                 results.add(result)
 
                 Log.d(TAG, "📊 URL: $url - Status: ${if (result.getBoolean("isActive")) "ACTIVE" else "INACTIVE"}")
@@ -241,12 +239,73 @@ class NetGuardBackgroundService : Service() {
                     put("timestamp", System.currentTimeMillis())
                     put("responseTime", -1)
                 }
+                result = errorResult
                 results.add(errorResult)
+            } finally {
+                // Send individual callback immediately if a result was obtained
+                result?.let { sendSingleCallback(it) }
             }
         }
 
         Log.d(TAG, "📈 URL checks completed: ${results.size} results")
         results
+    }
+
+    private suspend fun sendSingleCallback(result: JSONObject) = withContext(Dispatchers.IO) {
+        try {
+            val callbackUrl = callbackConfig?.getString("url")
+            val callbackName = callbackConfig?.getString("name") ?: "Unknown"
+
+            if (callbackUrl.isNullOrEmpty()) {
+                // Silently return if no callback URL is set
+                return@withContext
+            }
+
+            Log.d(TAG, "📤 Sending single result callback for ${result.getString("url")}")
+
+            val payload = JSONObject().apply {
+                put("checkType", "background_single")
+                put("timestamp", System.currentTimeMillis())
+                put("isBackground", true)
+                put("url", result) // Embed the single result object
+                put("device", getDeviceInfo())
+                put("callbackName", callbackName)
+            }
+
+            val requestBody = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+
+            val request = Request.Builder()
+                .url(callbackUrl)
+                .post(requestBody)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "NetGuard-Background/2.1-single")
+                .header("Accept", "application/json")
+                .build()
+
+            val callbackClient = OkHttpClient.Builder()
+                .connectTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
+                .readTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
+                .writeTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
+                .build()
+
+            val response = callbackClient.newCall(request).execute()
+
+            if (response.isSuccessful) {
+                successfulCallbacks++
+                Log.d(TAG, "✅ Single callback sent successfully for ${result.getString("url")}: HTTP ${response.code}")
+            } else {
+                failedCallbacks++
+                Log.w(TAG, "⚠️ Single callback failed for ${result.getString("url")}: HTTP ${response.code} - ${response.message}")
+            }
+
+            response.close()
+            sendStatsUpdateToReact() // Update stats after each callback attempt
+
+        } catch (e: Exception) {
+            failedCallbacks++
+            Log.e(TAG, "❌ Error sending single callback for ${result.optString("url")}", e)
+            sendStatsUpdateToReact()
+        }
     }
 
     private suspend fun checkSingleUrl(url: String): JSONObject = withContext(Dispatchers.IO) {
@@ -342,78 +401,7 @@ class NetGuardBackgroundService : Service() {
         result
     }
 
-    private suspend fun sendCallback(results: List<JSONObject>) = withContext(Dispatchers.IO) {
-        try {
-            val callbackUrl = callbackConfig?.getString("url")
-            val callbackName = callbackConfig?.getString("name") ?: "Unknown"
-
-            if (callbackUrl.isNullOrEmpty()) {
-                Log.w(TAG, "⚠️ No callback URL configured")
-                return@withContext
-            }
-
-            Log.d(TAG, "📤 Sending callback to: $callbackUrl")
-
-            val activeCount = results.count { it.getBoolean("isActive") }
-            val inactiveCount = results.size - activeCount
-
-            val payload = JSONObject().apply {
-                put("checkType", "background_batch")
-                put("timestamp", System.currentTimeMillis())
-                put("isBackground", true)
-                put("backgroundServiceRunning", true)
-                put("serviceStats", JSONObject().apply {
-                    put("totalChecks", totalChecks)
-                    put("successfulCallbacks", successfulCallbacks)
-                    put("failedCallbacks", failedCallbacks)
-                    put("uptime", System.currentTimeMillis() - serviceStartTime)
-                    put("startTime", serviceStartTime)
-                    put("lastCheckTime", lastCheckTime)
-                })
-                put("summary", JSONObject().apply {
-                    put("total", results.size)
-                    put("active", activeCount)
-                    put("inactive", inactiveCount)
-                })
-                put("urls", JSONArray(results))
-                put("device", getDeviceInfo())
-                put("callbackName", callbackName)
-            }
-
-            val requestBody = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-
-            val request = Request.Builder()
-                .url(callbackUrl)
-                .post(requestBody)
-                .header("Content-Type", "application/json")
-                .header("User-Agent", "NetGuard-Background/2.0")
-                .header("Accept", "application/json")
-                .build()
-
-            // Use separate client with shorter timeout for callbacks
-            val callbackClient = OkHttpClient.Builder()
-                .connectTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
-                .readTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
-                .writeTimeout(CALLBACK_TIMEOUT, TimeUnit.MILLISECONDS)
-                .build()
-
-            val response = callbackClient.newCall(request).execute()
-
-            if (response.isSuccessful) {
-                successfulCallbacks++
-                Log.d(TAG, "✅ Callback sent successfully: HTTP ${response.code}")
-            } else {
-                failedCallbacks++
-                Log.w(TAG, "⚠️ Callback failed: HTTP ${response.code} - ${response.message}")
-            }
-
-            response.close()
-
-        } catch (e: Exception) {
-            failedCallbacks++
-            Log.e(TAG, "❌ Error sending callback", e)
-        }
-    }
+    
 
     private fun getDeviceInfo(): JSONObject {
         return JSONObject().apply {

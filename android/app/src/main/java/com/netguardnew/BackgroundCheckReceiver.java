@@ -18,6 +18,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.OutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
@@ -33,6 +35,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
     private static final String TAG = "NetGuard:BackgroundCheckReceiver";
     private static final String PREFS_NAME = "NetGuardBackgroundService";
+    private static final long URL_SYNC_INTERVAL = 10 * 60 * 1000; // Check for URL changes every 10 minutes
+    private static final String URL_SYNC_KEY = "last_url_sync";
 
     private static final String[] USER_AGENTS = {
         "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -84,7 +88,132 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
         }
     }
 
+    private void performBackgroundUrlSync(Context context, String configJson) {
+        try {
+            SharedPreferences preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            long lastUrlSync = preferences.getLong(URL_SYNC_KEY, 0);
+            long currentTime = System.currentTimeMillis();
+
+            // Check if it's time to sync URLs
+            if (currentTime - lastUrlSync > URL_SYNC_INTERVAL) {
+                JSONObject config = new JSONObject(configJson);
+
+                // Get API endpoint from configuration if available
+                String apiEndpoint = config.optString("apiEndpoint", "");
+                if (!apiEndpoint.isEmpty()) {
+                    Log.d(TAG, "Performing background URL sync from: " + apiEndpoint);
+
+                    boolean syncSuccess = syncUrlsFromApi(context, apiEndpoint);
+                    if (syncSuccess) {
+                        preferences.edit()
+                            .putLong(URL_SYNC_KEY, currentTime)
+                            .apply();
+                        Log.d(TAG, "Background URL sync completed successfully");
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error in background URL sync", e);
+        }
+    }
+
+    private boolean syncUrlsFromApi(Context context, String apiEndpoint) {
+        try {
+            URL url = new URL(apiEndpoint);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(15000);
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setRequestProperty("User-Agent", "NetGuard-Background-Sync/2.0");
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+                reader.close();
+
+                // Parse API response
+                String responseString = response.toString();
+                JSONArray newUrls;
+
+                try {
+                    // Try to parse as JSONObject first
+                    JSONObject jsonResponse = new JSONObject(responseString);
+
+                    // Handle different API response formats
+                    if (jsonResponse.has("data") && jsonResponse.get("data") instanceof JSONArray) {
+                        newUrls = jsonResponse.getJSONArray("data");
+                    } else {
+                        Log.w(TAG, "Unexpected JSONObject response format");
+                        return false;
+                    }
+                } catch (org.json.JSONException e) {
+                    // If JSONObject parsing fails, try JSONArray
+                    try {
+                        newUrls = new JSONArray(responseString);
+                    } catch (org.json.JSONException e2) {
+                        Log.w(TAG, "Response is neither valid JSONObject nor JSONArray");
+                        return false;
+                    }
+                }
+
+                // Check if URLs have changed
+                SharedPreferences preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                String currentUrlsJson = preferences.getString("service_config", "{}");
+                JSONObject currentConfig = new JSONObject(currentUrlsJson);
+                JSONArray currentUrls = currentConfig.optJSONArray("urls");
+
+                int currentCount = currentUrls != null ? currentUrls.length() : 0;
+                int newCount = newUrls.length();
+
+                if (newCount != currentCount) {
+                    Log.d(TAG, "URL count changed: " + currentCount + " -> " + newCount);
+
+                    // Update stored configuration with new URLs
+                    JSONArray urlArray = new JSONArray();
+                    for (int i = 0; i < newUrls.length(); i++) {
+                        JSONObject item = newUrls.getJSONObject(i);
+                        String urlString = item.optString("url", "");
+                        if (!urlString.isEmpty()) {
+                            urlArray.put(urlString);
+                        }
+                    }
+
+                    currentConfig.put("urls", urlArray);
+                    preferences.edit()
+                        .putString("service_config", currentConfig.toString())
+                        .putLong("last_url_update", System.currentTimeMillis())
+                        .putInt("new_urls_count", Math.max(0, newCount - currentCount))
+                        .apply();
+
+                    Log.d(TAG, "Service configuration updated with " + urlArray.length() + " URLs");
+                    return true;
+                }
+
+                connection.disconnect();
+                return true;
+            } else {
+                Log.w(TAG, "Background URL sync failed with HTTP " + responseCode);
+                return false;
+            }
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error syncing URLs from API", e);
+            return false;
+        }
+    }
+
     private void performBackgroundCheck(Context context, String configJson, PowerManager.WakeLock wakeLock) {
+        // First, try to sync URLs from API
+        performBackgroundUrlSync(context, configJson);
         ExecutorService executorService = Executors.newSingleThreadExecutor();
 
         executorService.execute(() -> {
