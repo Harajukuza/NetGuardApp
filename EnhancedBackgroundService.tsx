@@ -293,7 +293,23 @@ class EnhancedBackgroundService {
   }
 
   private async backgroundTaskFunction(taskData: any) {
-    const config = taskData.parameters?.config as BackgroundServiceConfig;
+    // Prefer config passed via parameters, but fall back to stored service config
+    let config = taskData?.parameters?.config as BackgroundServiceConfig;
+
+    if (!config) {
+      try {
+        this.log('Background task: No config in parameters, attempting to load from storage');
+        const stored = await AsyncStorage.getItem(STORAGE_KEYS.SERVICE_CONFIG);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          // stored state shape may include config inside an object
+          config = parsed.config ? (parsed.config as BackgroundServiceConfig) : (parsed as BackgroundServiceConfig);
+        }
+      } catch (e) {
+        this.log('Background task: Error loading config from storage', e);
+      }
+    }
+
     if (!config) {
       this.log('Background task: No config provided');
       return;

@@ -18,12 +18,34 @@ const BackgroundURLCheckTask = async taskData => {
   const startTime = Date.now();
 
   try {
-    // Load configuration from storage
-    const [savedUrls, savedCallback, savedAutoCheck] = await Promise.all([
-      AsyncStorage.getItem('@Enhanced:urls'),
-      AsyncStorage.getItem('@Enhanced:callback'),
-      AsyncStorage.getItem('@Enhanced:autoCheckEnabled'),
-    ]);
+    // Prefer config passed from native service (if any)
+    let savedUrls = null;
+    let savedCallback = null;
+    let savedAutoCheck = null;
+
+    if (taskData && taskData.serviceConfig) {
+      console.log('[HeadlessTask] Using serviceConfig provided by native service');
+      try {
+        const parsed = typeof taskData.serviceConfig === 'string' ? JSON.parse(taskData.serviceConfig) : taskData.serviceConfig;
+        savedUrls = JSON.stringify(parsed.urls || []);
+        savedCallback = JSON.stringify(parsed.callbackConfig || {});
+        savedAutoCheck = JSON.stringify(true);
+      } catch (e) {
+        console.warn('[HeadlessTask] Invalid serviceConfig provided, falling back to AsyncStorage', e);
+      }
+    }
+
+    // Load configuration from storage if not provided
+    if (!savedUrls || !savedCallback || !savedAutoCheck) {
+      const loaded = await Promise.all([
+        AsyncStorage.getItem('@Enhanced:urls'),
+        AsyncStorage.getItem('@Enhanced:callback'),
+        AsyncStorage.getItem('@Enhanced:autoCheckEnabled'),
+      ]);
+      savedUrls = savedUrls || loaded[0];
+      savedCallback = savedCallback || loaded[1];
+      savedAutoCheck = savedAutoCheck || loaded[2];
+    }
 
     // Check if auto check is enabled
     if (!savedAutoCheck || !JSON.parse(savedAutoCheck)) {

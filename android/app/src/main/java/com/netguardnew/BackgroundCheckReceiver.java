@@ -132,7 +132,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 Log.d(TAG, "Background check completed successfully. Checked " + results.size() + " URLs");
 
                 // Start HeadlessJsTask to update React Native state
-                startHeadlessJsTask(context, results);
+                    startHeadlessJsTask(context, results, configJson);
 
             } catch (Exception e) {
                 Log.e(TAG, "Error performing background check", e);
@@ -307,7 +307,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
         }
     }
 
-    private void startHeadlessJsTask(Context context, List<URLCheckResult> results) {
+    private void startHeadlessJsTask(Context context, List<URLCheckResult> results, String serviceConfigJson) {
         try {
             Intent serviceIntent = new Intent(context, BackgroundCheckService.class);
 
@@ -324,7 +324,17 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
             resultData.putInt("inactiveCount", (int)inactiveCount);
 
             serviceIntent.putExtra("resultData", Arguments.toBundle(resultData));
-            context.startService(serviceIntent);
+
+            // Attach the saved service configuration so JS Headless task can use it
+            if (serviceConfigJson != null) {
+                serviceIntent.putExtra("service_config", serviceConfigJson);
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent);
+            } else {
+                context.startService(serviceIntent);
+            }
 
             Log.d(TAG, "HeadlessJsTask started to update React Native state");
 

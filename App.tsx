@@ -1,3 +1,4 @@
+/* eslint-disable react-native/no-inline-styles */
 /**
  * URL Monitoring App - Enhanced Version with Native Background Service
  * Features:
@@ -48,7 +49,7 @@ import EnhancedBackgroundService, {
   BackgroundServiceStats,
   URLCheckResult,
 } from './EnhancedBackgroundService';
-
+import { ScrollToTopComponent } from './src/component/Scrolltotopcomponent'
 // Native module for Android background service
 const { BackgroundServiceModule } = NativeModules;
 
@@ -168,8 +169,7 @@ function AppContent() {
   const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
 
   // Enhanced background service states
-  const [isEnhancedServiceRunning, setIsEnhancedServiceRunning] =
-    useState(false);
+  const [isEnhancedServiceRunning, setIsEnhancedServiceRunning] = useState(false);
   const [serviceStats, setServiceStats] = useState<BackgroundServiceStats>({
     totalChecks: 0,
     successfulChecks: 0,
