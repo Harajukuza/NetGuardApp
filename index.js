@@ -18,53 +18,106 @@ const BackgroundURLCheckTask = async taskData => {
   const startTime = Date.now();
 
   try {
-    // Prefer config passed from native service (if any)
-    let savedUrls = null;
-    let savedCallback = null;
-    let savedAutoCheck = null;
-
+    // ใช้ config จาก native service หรือ AsyncStorage
+    let urls = [];
+    let callbackConfig = null;
+    
+    // รับ config จาก native service ก่อน
     if (taskData && taskData.serviceConfig) {
-      console.log('[HeadlessTask] Using serviceConfig provided by native service');
+      console.log('[HeadlessTask] Using config from native service');
       try {
-        const parsed = typeof taskData.serviceConfig === 'string' ? JSON.parse(taskData.serviceConfig) : taskData.serviceConfig;
-        savedUrls = JSON.stringify(parsed.urls || []);
-        savedCallback = JSON.stringify(parsed.callbackConfig || {});
-        savedAutoCheck = JSON.stringify(true);
+        const parsed = typeof taskData.serviceConfig === 'string' 
+          ? JSON.parse(taskData.serviceConfig) 
+          : taskData.serviceConfig;
+        
+        if (parsed.urls && Array.isArray(parsed.urls)) {
+          urls = parsed.urls.map(url => ({ url }));
+        }
+        if (parsed.callbackConfig) {
+          callbackConfig = parsed.callbackConfig;
+        }
       } catch (e) {
-        console.warn('[HeadlessTask] Invalid serviceConfig provided, falling back to AsyncStorage', e);
+        console.warn('[HeadlessTask] Error parsing service config:', e);
       }
     }
 
-    // Load configuration from storage if not provided
-    if (!savedUrls || !savedCallback || !savedAutoCheck) {
-      const loaded = await Promise.all([
+    // ถ้าไม่มี config จาก native service ให้ใช้จาก AsyncStorage
+    if (urls.length === 0 || !callbackConfig) {
+      console.log('[HeadlessTask] Loading config from AsyncStorage');
+      const [savedUrls, savedCallback] = await Promise.all([
         AsyncStorage.getItem('@Enhanced:urls'),
-        AsyncStorage.getItem('@Enhanced:callback'),
-        AsyncStorage.getItem('@Enhanced:autoCheckEnabled'),
+        AsyncStorage.getItem('@Enhanced:callback')
       ]);
-      savedUrls = savedUrls || loaded[0];
-      savedCallback = savedCallback || loaded[1];
-      savedAutoCheck = savedAutoCheck || loaded[2];
+
+      if (savedUrls) {
+        try {
+          const parsed = JSON.parse(savedUrls);
+          if (Array.isArray(parsed)) {
+            urls = parsed;
+          } else if (parsed?.urls && Array.isArray(parsed.urls)) {
+            urls = parsed.urls.map(url => ({ url }));
+          }
+        } catch (e) {
+          console.error('[HeadlessTask] Error parsing saved URLs:', e);
+        }
+      }
+
+      if (savedCallback) {
+        try {
+          callbackConfig = JSON.parse(savedCallback);
+        } catch (e) {
+          console.error('[HeadlessTask] Error parsing saved callback:', e);
+        }
+      }
     }
 
-    // Check if auto check is enabled
-    if (!savedAutoCheck || !JSON.parse(savedAutoCheck)) {
-      console.log('[HeadlessTask] Auto check disabled, skipping...');
-      return { success: false, reason: 'disabled' };
-    }
-
-    if (!savedUrls || !savedCallback) {
-      console.log('[HeadlessTask] No URLs or callback configured');
-      return { success: false, reason: 'not_configured' };
-    }
-
-    const urls = JSON.parse(savedUrls);
-    const callbackConfig = JSON.parse(savedCallback);
-
+    // ถ้ายังไม่มี URLs ให้ลองดึงจาก API
     if (urls.length === 0) {
-      console.log('[HeadlessTask] No URLs to check');
-      return { success: false, reason: 'no_urls' };
+      try {
+        const [selectedCallback, apiEndpoint] = await Promise.all([
+          AsyncStorage.getItem('@Enhanced:selectedCallback'),
+          AsyncStorage.getItem('@Enhanced:apiEndpoint')
+        ]);
+
+        if (selectedCallback && apiEndpoint) {
+          console.log('[HeadlessTask] Fetching URLs from API');
+          const response = await fetch(apiEndpoint);
+          const data = await response.json();
+          
+          if (data?.data && Array.isArray(data.data)) {
+            const filtered = data.data.filter(
+              item => String(item.callback_name) === String(selectedCallback)
+            );
+            
+            if (filtered.length > 0) {
+              urls = filtered.map(item => ({
+                id: `${item.id}_${Date.now()}`,
+                url: item.url
+              }));
+              
+              // อัพเดท callback config ถ้ามีข้อมูลใหม่จาก API
+              if (filtered[0].callback_url) {
+                callbackConfig = {
+                  name: selectedCallback,
+                  url: filtered[0].callback_url
+                };
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[HeadlessTask] Error fetching from API:', e);
+      }
     }
+
+    // ตรวจสอบว่ามี URLs และ callback config
+    if (urls.length === 0 || !callbackConfig?.url) {
+      console.log('[HeadlessTask] No URLs or callback config available');
+      return { success: false, reason: 'no_data' };
+    }
+
+    // เก็บ URLs ที่ใช้ล่าสุดลง storage
+    await AsyncStorage.setItem('@Enhanced:lastUsedUrls', JSON.stringify(urls));
 
     console.log(`[HeadlessTask] Checking ${urls.length} URLs...`);
 
@@ -130,14 +183,14 @@ const BackgroundURLCheckTask = async taskData => {
         ).length;
 
         const payload = {
-          checkType: 'headless_js',
+          checkType: taskData?.source === 'native' ? 'enhanced_background' : 'headless_js',
           timestamp: new Date().toISOString(),
           isBackground: true,
-          source: 'HeadlessJS',
+          source: taskData?.source || 'HeadlessJS',
           summary: {
-            total: checkResults.length,
+            total: urls.length, // ใช้จำนวน URLs ที่ถูกต้อง
             active: activeCount,
-            inactive: inactiveCount,
+            inactive: inactiveCount
           },
           urls: checkResults,
           device: {

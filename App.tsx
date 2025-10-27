@@ -42,14 +42,14 @@ import {
   SafeAreaProvider,
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
-import DeviceInfo from 'react-native-device-info';
+// import DeviceInfo from 'react-native-device-info';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import EnhancedBackgroundService, {
   BackgroundServiceConfig,
   BackgroundServiceStats,
   URLCheckResult,
 } from './EnhancedBackgroundService';
-import { ScrollToTopComponent } from './src/component/Scrolltotopcomponent'
+
 // Native module for Android background service
 const { BackgroundServiceModule } = NativeModules;
 
@@ -63,10 +63,12 @@ const STORAGE_KEYS = {
   AUTO_CHECK_ENABLED: '@Enhanced:autoCheckEnabled',
   API_ENDPOINT: '@Enhanced:apiEndpoint',
   SERVICE_CONFIG: '@Enhanced:serviceConfig',
+  SELECTED_CALLBACK: '@Enhanced:selectedCallback',
+  AUTO_SYNC_ENABLED: '@Enhanced:autoSyncEnabled',
 };
 
 const REQUEST_TIMEOUT = 30000;
-const CALLBACK_TIMEOUT = 15000;
+// const CALLBACK_TIMEOUT = 15000;
 
 // TypeScript interfaces
 interface URLItem {
@@ -149,6 +151,64 @@ function AppContent() {
   const appState = useRef(AppState.currentState);
   const lastActivityTime = useRef<Date>(new Date());
 
+  // Define callbacks first
+  const refreshNetworkInfo = useCallback(async () => {
+    try {
+      if (Platform.OS === 'android' && BackgroundServiceModule) {
+        const nativeNetworkInfo = await BackgroundServiceModule.getNetworkInfo();
+        setNetworkInfo({
+          type: nativeNetworkInfo.type || 'Unknown',
+          carrier: nativeNetworkInfo.carrier || 'Unknown',
+          isConnected: nativeNetworkInfo.isConnected || false,
+        });
+      } else {
+        setNetworkInfo({
+          type: 'Unknown',
+          carrier: 'iOS/Fallback',
+          isConnected: true,
+        });
+      }
+    } catch (error) {
+      console.error('Error refreshing network info:', error);
+    }
+  }, []);
+
+  const loadServiceStats = useCallback(async () => {
+    try {
+      const status = await backgroundService.getServiceStatus();
+      setServiceStats(status.stats);
+      setIsEnhancedServiceRunning(status.isRunning);
+
+      if (Platform.OS === 'android' && BackgroundServiceModule) {
+        const nativeStatus = await BackgroundServiceModule.getServiceStatus();
+        setNativeServiceStats({
+          totalChecks: nativeStatus.totalChecks || 0,
+          successfulCallbacks: nativeStatus.successfulCallbacks || 0,
+          failedCallbacks: nativeStatus.failedCallbacks || 0,
+          lastCheckTime: nativeStatus.lastCheckTime || null,
+        });
+      }
+    } catch (error) {
+      console.error('Error loading service stats:', error);
+    }
+  }, []);
+
+  const refreshServiceStatus = useCallback(async () => {
+    try {
+      await loadServiceStats();
+      const logs = await backgroundService.getServiceLogs();
+      setServiceLogs(logs.slice(-20));
+      const results = await backgroundService.getLastResults();
+      if (results) {
+        setLastResults(results.results || []);
+      }
+    } catch (error) {
+      console.error('Error refreshing service status:', error);
+    }
+  }, [loadServiceStats]);
+
+  
+
   // State management
   const [urls, setUrls] = useState<URLItem[]>([]);
   const [newUrl, setNewUrl] = useState('');
@@ -189,6 +249,67 @@ function AppContent() {
   const [apiCallbackNames, setApiCallbackNames] = useState<string[]>([]);
   const [selectedCallbackName, setSelectedCallbackName] = useState<string>('');
   const [isLoadingAPI, setIsLoadingAPI] = useState(false);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
+
+  // Sync URLs from API for a given callback name (or selected one)
+  const syncUrlsFromApi = useCallback(async (callbackNameParam?: string) => {
+    const cbName = callbackNameParam || selectedCallbackName;
+    try {
+      if (!apiEndpoint || !cbName) {
+        console.log('[syncUrlsFromApi] Missing apiEndpoint or callback name');
+        return;
+      }
+
+      const response = await fetch(apiEndpoint, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data: APIResponse = await response.json();
+
+      if (data.status === 'success' && data.data) {
+        const filteredData = data.data.filter(
+          item => String(item.callback_name) === String(cbName),
+        );
+
+        if (filteredData.length === 0) {
+          console.log('[syncUrlsFromApi] No URLs found for selected callback', cbName);
+          return;
+        }
+
+        const callbackUrl = filteredData[0].callback_url;
+        
+        // Update callback config if URL changed
+        setCallbackConfig(prev => {
+          if (!prev || prev.url !== callbackUrl || prev.name !== cbName) {
+            return { name: cbName, url: callbackUrl };
+          }
+          return prev;
+        });
+
+        // Create new URL items
+        const newUrls: URLItem[] = filteredData.map(item => ({
+          id: `${item.id}_${Date.now()}_${Math.random()}`,
+          url: item.url,
+          status: 'checking' as const,
+          checkHistory: [],
+        }));
+
+        // Replace all URLs with new ones from API
+        setUrls(newUrls);
+        setSelectedCallbackName(cbName);
+        await AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, cbName);
+
+        console.log(`[syncUrlsFromApi] Synced ${newUrls.length} URLs for callback: ${cbName}`);
+      }
+    } catch (error) {
+      console.error('Error syncing URLs from API:', error);
+    }
+  }, [apiEndpoint, selectedCallbackName]);
 
   // Native service states
   const [useNativeService, setUseNativeService] = useState(
@@ -269,6 +390,17 @@ function AppContent() {
     };
   }, [isEnhancedServiceRunning]);
 
+  // Periodic sync handler
+  useEffect(() => {
+    if (!isEnhancedServiceRunning || !autoSyncEnabled || !selectedCallbackName) return;
+
+    const syncInterval = setInterval(() => {
+      if (selectedCallbackName) syncUrlsFromApi(selectedCallbackName);
+    }, parseInt(checkInterval, 10) * 60 * 1000); // Sync at the same interval as URL checks
+
+    return () => clearInterval(syncInterval);
+  }, [isEnhancedServiceRunning, autoSyncEnabled, selectedCallbackName, checkInterval, syncUrlsFromApi]);
+
   // App state change handler
   useEffect(() => {
     const subscription = AppState.addEventListener(
@@ -284,6 +416,11 @@ function AppContent() {
           console.log('App returned to foreground - refreshing service status');
           refreshServiceStatus();
           refreshNetworkInfo();
+          
+          // Sync URLs if auto-sync is enabled
+          if (autoSyncEnabled && selectedCallbackName) {
+            syncUrlsFromApi(selectedCallbackName);
+          }
         }
 
         appState.current = nextAppState;
@@ -293,15 +430,15 @@ function AppContent() {
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [autoSyncEnabled, selectedCallbackName, syncUrlsFromApi, refreshServiceStatus, refreshNetworkInfo]);
 
   // Network change handler
-  const handleNetworkChange = useCallback((networkInfo: any) => {
-    console.log('Network state changed:', networkInfo);
+  const handleNetworkChange = useCallback((netInfo: any) => {
+    console.log('Network state changed:', netInfo);
     setNetworkInfo({
-      type: networkInfo.type || 'Unknown',
-      carrier: getCarrierName(networkInfo.type),
-      isConnected: networkInfo.isConnected || false,
+      type: netInfo.type || 'Unknown',
+      carrier: getCarrierName(netInfo.type),
+      isConnected: netInfo.isConnected || false,
     });
   }, []);
 
@@ -329,8 +466,9 @@ function AppContent() {
 
   const isValidUrl = (url: string): boolean => {
     try {
-      new URL(url);
-      return url.startsWith('http://') || url.startsWith('https://');
+  const _unusedUrl = new URL(url);
+  _unusedUrl.toString();
+  return url.startsWith('http://') || url.startsWith('https://');
     } catch {
       return false;
     }
@@ -374,6 +512,7 @@ function AppContent() {
   };
 
   // Data management functions
+
   const loadSavedData = async () => {
     try {
       const [
@@ -383,6 +522,8 @@ function AppContent() {
         savedLastCallback,
         savedLastCheck,
         savedApiEndpoint,
+        savedSelectedCallback,
+        savedAutoSync,
       ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.URLS),
         AsyncStorage.getItem(STORAGE_KEYS.CALLBACK),
@@ -390,6 +531,8 @@ function AppContent() {
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CALLBACK),
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CHECK_TIME),
         AsyncStorage.getItem(STORAGE_KEYS.API_ENDPOINT),
+        AsyncStorage.getItem(STORAGE_KEYS.SELECTED_CALLBACK),
+        AsyncStorage.getItem(STORAGE_KEYS.AUTO_SYNC_ENABLED),
       ]);
 
       if (savedUrls) {
@@ -409,6 +552,8 @@ function AppContent() {
       if (savedCallback) setCallbackConfig(JSON.parse(savedCallback));
       if (savedInterval) setCheckInterval(savedInterval);
       if (savedApiEndpoint) setApiEndpoint(savedApiEndpoint);
+      if (savedSelectedCallback) setSelectedCallbackName(savedSelectedCallback);
+      if (savedAutoSync) setAutoSyncEnabled(savedAutoSync === 'true');
 
       if (savedLastCallback) {
         const parsed = JSON.parse(savedLastCallback);
@@ -420,6 +565,11 @@ function AppContent() {
 
       if (savedLastCheck) {
         setLastCheckTime(new Date(savedLastCheck));
+      }
+
+      // Load from API if we have an endpoint
+      if (savedApiEndpoint && savedSelectedCallback) {
+        await loadFromAPI();
       }
     } catch (error) {
       console.error('Error loading saved data:', error);
@@ -436,6 +586,8 @@ function AppContent() {
         ),
         AsyncStorage.setItem(STORAGE_KEYS.INTERVAL, checkInterval),
         AsyncStorage.setItem(STORAGE_KEYS.API_ENDPOINT, apiEndpoint),
+        AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, selectedCallbackName),
+        AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, autoSyncEnabled.toString()),
       ]);
 
       if (lastCheckTime) {
@@ -447,7 +599,7 @@ function AppContent() {
     } catch (error) {
       console.error('Error saving data:', error);
     }
-  }, [urls, callbackConfig, checkInterval, apiEndpoint, lastCheckTime]);
+  }, [urls, callbackConfig, checkInterval, apiEndpoint, lastCheckTime, autoSyncEnabled, selectedCallbackName]);
 
   // Save data when state changes (debounced)
   useEffect(() => {
@@ -507,75 +659,21 @@ function AppContent() {
     }
   };
 
-  // Network info functions
-  const refreshNetworkInfo = async () => {
-    try {
-      if (Platform.OS === 'android' && BackgroundServiceModule) {
-        const nativeNetworkInfo =
-          await BackgroundServiceModule.getNetworkInfo();
-        setNetworkInfo({
-          type: nativeNetworkInfo.type || 'Unknown',
-          carrier: nativeNetworkInfo.carrier || 'Unknown',
-          isConnected: nativeNetworkInfo.isConnected || false,
-        });
-      } else {
-        // Fallback for iOS or if native module is not available
-        setNetworkInfo({
-          type: 'Unknown',
-          carrier: 'iOS/Fallback',
-          isConnected: true,
-        });
-      }
-    } catch (error) {
-      console.error('Error refreshing network info:', error);
-    }
-  };
-
   // Service management functions
-  const loadServiceStats = async () => {
-    try {
-      const status = await backgroundService.getServiceStatus();
-      setServiceStats(status.stats);
-      setIsEnhancedServiceRunning(status.isRunning);
-
-      if (Platform.OS === 'android' && BackgroundServiceModule) {
-        const nativeStatus = await BackgroundServiceModule.getServiceStatus();
-        setNativeServiceStats({
-          totalChecks: nativeStatus.totalChecks || 0,
-          successfulCallbacks: nativeStatus.successfulCallbacks || 0,
-          failedCallbacks: nativeStatus.failedCallbacks || 0,
-          lastCheckTime: nativeStatus.lastCheckTime || null,
-        });
-      }
-    } catch (error) {
-      console.error('Error loading service stats:', error);
-    }
-  };
-
-  const refreshServiceStatus = async () => {
-    try {
-      await loadServiceStats();
-
-      const logs = await backgroundService.getServiceLogs();
-      setServiceLogs(logs.slice(-20)); // Keep last 20 logs
-
-      const lastResults = await backgroundService.getLastResults();
-      if (lastResults) {
-        setLastResults(lastResults.results || []);
-      }
-    } catch (error) {
-      console.error('Error refreshing service status:', error);
-    }
-  };
 
   const startEnhancedBackgroundService = async () => {
     try {
+      // If auto-sync is enabled, sync before starting service
+      if (autoSyncEnabled && selectedCallbackName) {
+        await syncUrlsFromApi(selectedCallbackName);
+      }
+
       if (urls.length === 0) {
         Alert.alert('No URLs', 'Please add URLs to monitor first');
         return;
       }
 
-      if (!callbackConfig.url) {
+      if (!(callbackConfig && callbackConfig.url)) {
         Alert.alert('No Callback', 'Please configure callback URL first');
         return;
       }
@@ -604,8 +702,8 @@ function AppContent() {
             intervalMinutes: config.intervalMinutes,
             timeoutMs: config.timeoutMs,
             retryAttempts: config.retryAttempts,
-            callbackUrl: config.callbackConfig.url,
-            callbackName: config.callbackConfig.name,
+            callbackUrl: config.callbackConfig?.url,
+            callbackName: config.callbackConfig?.name,
           };
 
           const result =
@@ -794,8 +892,8 @@ function AppContent() {
           urls: JSON.stringify(urls.map(url => url.url)),
           timeoutMs: REQUEST_TIMEOUT,
           retryAttempts: 2,
-          callbackUrl: callbackConfig.url,
-          callbackName: callbackConfig.name,
+          callbackUrl: callbackConfig?.url,
+          callbackName: callbackConfig?.name,
         };
 
         const result = await BackgroundServiceModule.performNativeURLCheck(
@@ -901,19 +999,22 @@ function AppContent() {
 
   // Callback configuration
   const saveCallbackConfig = () => {
-    if (!callbackConfig.name.trim() || !callbackConfig.url.trim()) {
+    const name = (callbackConfig?.name || '').trim();
+    const urlVal = (callbackConfig?.url || '').trim();
+
+    if (!name || !urlVal) {
       Alert.alert('Error', 'Please fill in both callback name and URL');
       return;
     }
 
-    const normalizedCallbackUrl = normalizeUrl(callbackConfig.url);
+    const normalizedCallbackUrl = normalizeUrl(urlVal);
 
     if (!isValidUrl(normalizedCallbackUrl)) {
       Alert.alert('Error', 'Please enter a valid callback URL');
       return;
     }
 
-    const updatedConfig = { ...callbackConfig, url: normalizedCallbackUrl };
+    const updatedConfig = { name, url: normalizedCallbackUrl };
     setCallbackConfig(updatedConfig);
     Alert.alert('Success', 'Callback configuration saved');
   };
@@ -1173,6 +1274,44 @@ function AppContent() {
               </TouchableOpacity>
             )}
           </View>
+
+          {selectedCallbackName && (
+            <View style={[styles.toggleRow, styles.marginTop]}>
+              <Text style={[styles.toggleLabel, textStyle]}>
+                Auto-sync URLs from API
+              </Text>
+              <Switch
+                value={autoSyncEnabled}
+                onValueChange={async (enabled) => {
+                  // If enabling auto-sync but no callback selected, try to auto-select
+                  if (enabled && !selectedCallbackName) {
+                    if (apiCallbackNames.length === 1) {
+                      const only = apiCallbackNames[0];
+                      setSelectedCallbackName(only);
+                      await AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, only);
+                      await syncUrlsFromApi(only);
+                      setAutoSyncEnabled(true);
+                      await AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, 'true');
+                      return;
+                    }
+
+                    // If multiple callbacks available, prompt user to choose
+                    Alert.alert('Select callback', 'Please select a callback before enabling auto-sync');
+                    setShowAPIModal(true);
+                    return;
+                  }
+
+                  setAutoSyncEnabled(enabled);
+                  await AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, enabled ? 'true' : 'false');
+                  if (enabled && selectedCallbackName) {
+                    await syncUrlsFromApi(selectedCallbackName);
+                  }
+                }}
+                trackColor={{ false: '#767577', true: '#81b0ff' }}
+                thumbColor={autoSyncEnabled ? '#2196F3' : '#f4f3f4'}
+              />
+            </View>
+          )}
 
           {selectedCallbackName && (
             <Text style={[styles.selectedCallbackText, textStyle]}>
