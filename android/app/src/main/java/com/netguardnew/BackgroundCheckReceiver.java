@@ -91,7 +91,37 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 Log.d(TAG, "Starting background URL checks");
 
                 JSONObject config = new JSONObject(configJson);
-                JSONArray urlsArray = new JSONArray(config.getString("urls"));
+
+                // Robustly extract URLs array: support multiple shapes (JSONArray or stringified JSON or nested config)
+                JSONArray urlsArray = null;
+                try {
+                    if (config.has("urls")) {
+                        Object urlsObj = config.get("urls");
+                        if (urlsObj instanceof JSONArray) {
+                            urlsArray = (JSONArray) urlsObj;
+                        } else {
+                            urlsArray = new JSONArray(config.getString("urls"));
+                        }
+                    } else if (config.has("config") && config.get("config") instanceof JSONObject) {
+                        JSONObject inner = config.getJSONObject("config");
+                        if (inner.has("urls")) {
+                            Object u = inner.get("urls");
+                            if (u instanceof JSONArray) {
+                                urlsArray = (JSONArray) u;
+                            } else {
+                                urlsArray = new JSONArray(inner.getString("urls"));
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to parse urls from config in primary ways, attempting fallbacks", e);
+                }
+
+                if (urlsArray == null) {
+                    Log.w(TAG, "No URLs found in config - aborting background check");
+                    wakeLock.release();
+                    return;
+                }
 
                 List<URLCheckResult> results = new ArrayList<>();
 
@@ -117,7 +147,32 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 // Update statistics
                 updateStatistics(context, results);
 
-                // Send callback if configured
+                // Ensure callback URL is present in config object for sendBackgroundCallback
+                String callbackUrl = null;
+                try {
+                    if (config.has("callbackUrl")) {
+                        callbackUrl = config.optString("callbackUrl", null);
+                    } else if (config.has("callbackConfig")) {
+                        JSONObject cb = config.optJSONObject("callbackConfig");
+                        if (cb != null) callbackUrl = cb.optString("url", null);
+                    } else if (config.has("config") && config.get("config") instanceof JSONObject) {
+                        JSONObject inner = config.getJSONObject("config");
+                        if (inner.has("callbackUrl")) {
+                            callbackUrl = inner.optString("callbackUrl", null);
+                        } else if (inner.has("callbackConfig")) {
+                            JSONObject cb = inner.optJSONObject("callbackConfig");
+                            if (cb != null) callbackUrl = cb.optString("url", null);
+                        }
+                    }
+
+                    if (callbackUrl != null && (config.isNull("callbackUrl") || !config.has("callbackUrl"))) {
+                        config.put("callbackUrl", callbackUrl);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Could not normalize callbackUrl in config", e);
+                }
+
+                // Send callback if configured (native will perform the callback)
                 if (config.has("callbackUrl") && !config.isNull("callbackUrl")) {
                     sendBackgroundCallback(context, results, config);
                 }
@@ -130,7 +185,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
                 Log.d(TAG, "Background check completed successfully. Checked " + results.size() + " URLs");
 
-                // Start HeadlessJsTask to update React Native state
+                // Start HeadlessJsTask to update React Native state.
+                // We set a flag "native_results_only" so JS Headless task will not re-run network checks or resend callbacks.
                 startHeadlessJsTask(context, results, configJson);
 
             } catch (Exception e) {
@@ -325,10 +381,13 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
             serviceIntent.putExtra("resultData", Arguments.toBundle(resultData));
 
-            // Attach the saved service configuration so JS Headless task can use it
+            // Attach the saved service configuration so JS Headless task can use it if needed
             if (serviceConfigJson != null) {
                 serviceIntent.putExtra("service_config", serviceConfigJson);
             }
+
+            // IMPORTANT: indicate that these are native results only — JS should not re-run checks/callbacks
+            serviceIntent.putExtra("native_results_only", true);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(serviceIntent);
@@ -336,7 +395,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 context.startService(serviceIntent);
             }
 
-            Log.d(TAG, "HeadlessJsTask started to update React Native state");
+            Log.d(TAG, "HeadlessJsTask started to update React Native state (native results only)");
 
         } catch (Exception e) {
             Log.e(TAG, "Error starting HeadlessJsTask", e);

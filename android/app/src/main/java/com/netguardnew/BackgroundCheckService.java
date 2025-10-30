@@ -48,11 +48,15 @@ public class BackgroundCheckService extends HeadlessJsTaskService {
                 data.putInt("inactiveCount", resultData.getInt("inactiveCount", 0));
             }
 
-                // If the receiver attached a service_config JSON, pass it to JS
-                String serviceConfig = extras.getString("service_config");
-                if (serviceConfig != null) {
-                    data.putString("serviceConfig", serviceConfig);
-                }
+            // If the receiver attached a service_config JSON, pass it to JS
+            String serviceConfig = extras.getString("service_config");
+            if (serviceConfig != null) {
+                data.putString("serviceConfig", serviceConfig);
+            }
+
+            // Forward native-results flag so HeadlessJS can short-circuit
+            boolean nativeOnly = extras.getBoolean("native_results_only", false);
+            data.putBoolean("nativeResultsOnly", nativeOnly);
 
             data.putBoolean("isBackground", true);
             data.putString("taskName", TASK_NAME);

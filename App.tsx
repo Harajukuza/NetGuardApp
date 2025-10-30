@@ -155,7 +155,8 @@ function AppContent() {
   const refreshNetworkInfo = useCallback(async () => {
     try {
       if (Platform.OS === 'android' && BackgroundServiceModule) {
-        const nativeNetworkInfo = await BackgroundServiceModule.getNetworkInfo();
+        const nativeNetworkInfo =
+          await BackgroundServiceModule.getNetworkInfo();
         setNetworkInfo({
           type: nativeNetworkInfo.type || 'Unknown',
           carrier: nativeNetworkInfo.carrier || 'Unknown',
@@ -207,8 +208,6 @@ function AppContent() {
     }
   }, [loadServiceStats]);
 
-  
-
   // State management
   const [urls, setUrls] = useState<URLItem[]>([]);
   const [newUrl, setNewUrl] = useState('');
@@ -229,7 +228,8 @@ function AppContent() {
   const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
 
   // Enhanced background service states
-  const [isEnhancedServiceRunning, setIsEnhancedServiceRunning] = useState(false);
+  const [isEnhancedServiceRunning, setIsEnhancedServiceRunning] =
+    useState(false);
   const [serviceStats, setServiceStats] = useState<BackgroundServiceStats>({
     totalChecks: 0,
     successfulChecks: 0,
@@ -251,65 +251,147 @@ function AppContent() {
   const [isLoadingAPI, setIsLoadingAPI] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
 
+  // Non-blocking API error message (avoid Alert.alert blocking behaviour)
+  const [apiError, setApiError] = useState<string | null>(null);
+
   // Sync URLs from API for a given callback name (or selected one)
-  const syncUrlsFromApi = useCallback(async (callbackNameParam?: string) => {
-    const cbName = callbackNameParam || selectedCallbackName;
-    try {
-      if (!apiEndpoint || !cbName) {
-        console.log('[syncUrlsFromApi] Missing apiEndpoint or callback name');
-        return;
-      }
-
-      const response = await fetch(apiEndpoint, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data: APIResponse = await response.json();
-
-      if (data.status === 'success' && data.data) {
-        const filteredData = data.data.filter(
-          item => String(item.callback_name) === String(cbName),
-        );
-
-        if (filteredData.length === 0) {
-          console.log('[syncUrlsFromApi] No URLs found for selected callback', cbName);
+  const syncUrlsFromApi = useCallback(
+    async (callbackNameParam?: string) => {
+      const cbName = callbackNameParam || selectedCallbackName;
+      try {
+        if (!apiEndpoint || !cbName) {
+          console.log('[syncUrlsFromApi] Missing apiEndpoint or callback name');
+          setApiError('Missing API endpoint or callback name');
           return;
         }
 
-        const callbackUrl = filteredData[0].callback_url;
-        
-        // Update callback config if URL changed
-        setCallbackConfig(prev => {
-          if (!prev || prev.url !== callbackUrl || prev.name !== cbName) {
-            return { name: cbName, url: callbackUrl };
-          }
-          return prev;
+        // Normalize and validate endpoint before fetch
+        const endpoint = normalizeUrl(apiEndpoint);
+        if (!isValidUrl(endpoint)) {
+          console.warn('[syncUrlsFromApi] Invalid API endpoint:', apiEndpoint);
+          setApiError('Invalid API endpoint URL');
+          return;
+        }
+        setIsLoadingAPI(true);
+        setApiError(null);
+
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
         });
 
-        // Create new URL items
-        const newUrls: URLItem[] = filteredData.map(item => ({
-          id: `${item.id}_${Date.now()}_${Math.random()}`,
-          url: item.url,
-          status: 'checking' as const,
-          checkHistory: [],
-        }));
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
 
-        // Replace all URLs with new ones from API
-        setUrls(newUrls);
-        setSelectedCallbackName(cbName);
-        await AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, cbName);
+        const data: APIResponse = await response.json();
 
-        console.log(`[syncUrlsFromApi] Synced ${newUrls.length} URLs for callback: ${cbName}`);
+        if (data.status === 'success' && data.data) {
+          const filteredData = data.data.filter(
+            item => String(item.callback_name) === String(cbName),
+          );
+
+          if (filteredData.length === 0) {
+            console.log(
+              '[syncUrlsFromApi] No URLs found for selected callback',
+              cbName,
+            );
+            setIsLoadingAPI(false);
+            setApiError(`No URLs found for callback: ${cbName}`);
+            return;
+          }
+
+          const callbackUrl = filteredData[0].callback_url;
+
+          // Update callback config if URL changed
+          setCallbackConfig(prev => {
+            if (!prev || prev.url !== callbackUrl || prev.name !== cbName) {
+              return { name: cbName, url: callbackUrl };
+            }
+            return prev;
+          });
+
+          // Create new URL items
+          const newUrls: URLItem[] = filteredData.map(item => ({
+            id: `${item.id}_${Date.now()}_${Math.random()}`,
+            url: item.url,
+            status: 'checking' as const,
+            checkHistory: [],
+          }));
+
+          // Replace all URLs with new ones from API
+          setUrls(newUrls);
+          setSelectedCallbackName(cbName);
+          await AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, cbName);
+
+          console.log(
+            `[syncUrlsFromApi] Synced ${newUrls.length} URLs for callback: ${cbName}`,
+          );
+          setIsLoadingAPI(false);
+          setApiError(null);
+        }
+      } catch (error) {
+        console.error('Error syncing URLs from API:', error);
+        setIsLoadingAPI(false);
+        setApiError(error?.message || 'Failed to sync from API');
       }
-    } catch (error) {
-      console.error('Error syncing URLs from API:', error);
-    }
-  }, [apiEndpoint, selectedCallbackName]);
+    },
+    [apiEndpoint, selectedCallbackName],
+  );
+
+  // Listen to background/headless events emitted from index.js for real-time UI updates
+  useEffect(() => {
+    const onApiSuccess = (payload: any) => {
+      console.log('API_SYNC_SUCCESS', payload);
+      // refresh saved data to pick up newly saved URLs/callback
+      loadSavedData().catch(() => {});
+      setApiError(null);
+      setIsLoadingAPI(false);
+    };
+
+    const onApiError = (payload: any) => {
+      console.warn('API_SYNC_ERROR', payload);
+      setApiError(payload?.error || 'API sync failed');
+      setIsLoadingAPI(false);
+    };
+
+    const onBackgroundResults = (payload: any) => {
+      console.log('BACKGROUND_CHECK_RESULTS', payload);
+      // ask saved data to refresh lastResults / UI
+      loadSavedData().catch(() => {});
+      // optionally set last results for immediate display
+      if (payload?.results && Array.isArray(payload.results)) {
+        setLastResults(payload.results);
+      }
+    };
+
+    const onBackgroundError = (payload: any) => {
+      console.warn('BACKGROUND_TASK_ERROR', payload);
+      // show non-blocking error
+      setApiError(payload?.error || 'Background task error');
+    };
+
+    const sub1 = DeviceEventEmitter.addListener(
+      'API_SYNC_SUCCESS',
+      onApiSuccess,
+    );
+    const sub2 = DeviceEventEmitter.addListener('API_SYNC_ERROR', onApiError);
+    const sub3 = DeviceEventEmitter.addListener(
+      'BACKGROUND_CHECK_RESULTS',
+      onBackgroundResults,
+    );
+    const sub4 = DeviceEventEmitter.addListener(
+      'BACKGROUND_TASK_ERROR',
+      onBackgroundError,
+    );
+
+    return () => {
+      sub1.remove();
+      sub2.remove();
+      sub3.remove();
+      sub4.remove();
+    };
+  }, []);
 
   // Native service states
   const [useNativeService, setUseNativeService] = useState(
@@ -392,14 +474,21 @@ function AppContent() {
 
   // Periodic sync handler
   useEffect(() => {
-    if (!isEnhancedServiceRunning || !autoSyncEnabled || !selectedCallbackName) return;
+    if (!isEnhancedServiceRunning || !autoSyncEnabled || !selectedCallbackName)
+      return;
 
     const syncInterval = setInterval(() => {
       if (selectedCallbackName) syncUrlsFromApi(selectedCallbackName);
     }, parseInt(checkInterval, 10) * 60 * 1000); // Sync at the same interval as URL checks
 
     return () => clearInterval(syncInterval);
-  }, [isEnhancedServiceRunning, autoSyncEnabled, selectedCallbackName, checkInterval, syncUrlsFromApi]);
+  }, [
+    isEnhancedServiceRunning,
+    autoSyncEnabled,
+    selectedCallbackName,
+    checkInterval,
+    syncUrlsFromApi,
+  ]);
 
   // App state change handler
   useEffect(() => {
@@ -416,7 +505,7 @@ function AppContent() {
           console.log('App returned to foreground - refreshing service status');
           refreshServiceStatus();
           refreshNetworkInfo();
-          
+
           // Sync URLs if auto-sync is enabled
           if (autoSyncEnabled && selectedCallbackName) {
             syncUrlsFromApi(selectedCallbackName);
@@ -430,7 +519,13 @@ function AppContent() {
     return () => {
       subscription.remove();
     };
-  }, [autoSyncEnabled, selectedCallbackName, syncUrlsFromApi, refreshServiceStatus, refreshNetworkInfo]);
+  }, [
+    autoSyncEnabled,
+    selectedCallbackName,
+    syncUrlsFromApi,
+    refreshServiceStatus,
+    refreshNetworkInfo,
+  ]);
 
   // Network change handler
   const handleNetworkChange = useCallback((netInfo: any) => {
@@ -466,9 +561,9 @@ function AppContent() {
 
   const isValidUrl = (url: string): boolean => {
     try {
-  const _unusedUrl = new URL(url);
-  _unusedUrl.toString();
-  return url.startsWith('http://') || url.startsWith('https://');
+      const _unusedUrl = new URL(url);
+      _unusedUrl.toString();
+      return url.startsWith('http://') || url.startsWith('https://');
     } catch {
       return false;
     }
@@ -586,8 +681,14 @@ function AppContent() {
         ),
         AsyncStorage.setItem(STORAGE_KEYS.INTERVAL, checkInterval),
         AsyncStorage.setItem(STORAGE_KEYS.API_ENDPOINT, apiEndpoint),
-        AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, selectedCallbackName),
-        AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, autoSyncEnabled.toString()),
+        AsyncStorage.setItem(
+          STORAGE_KEYS.SELECTED_CALLBACK,
+          selectedCallbackName,
+        ),
+        AsyncStorage.setItem(
+          STORAGE_KEYS.AUTO_SYNC_ENABLED,
+          autoSyncEnabled.toString(),
+        ),
       ]);
 
       if (lastCheckTime) {
@@ -599,7 +700,15 @@ function AppContent() {
     } catch (error) {
       console.error('Error saving data:', error);
     }
-  }, [urls, callbackConfig, checkInterval, apiEndpoint, lastCheckTime, autoSyncEnabled, selectedCallbackName]);
+  }, [
+    urls,
+    callbackConfig,
+    checkInterval,
+    apiEndpoint,
+    lastCheckTime,
+    autoSyncEnabled,
+    selectedCallbackName,
+  ]);
 
   // Save data when state changes (debounced)
   useEffect(() => {
@@ -930,13 +1039,21 @@ function AppContent() {
   // API integration functions
   const loadFromAPI = async () => {
     if (!apiEndpoint) {
-      Alert.alert('Error', 'Please enter API endpoint URL');
+      // non-blocking error and focus UI (avoid Alert which may block headless flows)
+      setApiError('Please enter API endpoint URL');
+      return;
+    }
+
+    // normalize and validate before trying
+    const endpoint = normalizeUrl(apiEndpoint);
+    if (!isValidUrl(endpoint)) {
+      setApiError('Invalid API endpoint URL');
       return;
     }
 
     setIsLoadingAPI(true);
     try {
-      const response = await fetch(apiEndpoint, {
+      const response = await fetch(endpoint, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -953,6 +1070,8 @@ function AppContent() {
           ...new Set(data.data.map(item => item.callback_name)),
         ];
         setApiCallbackNames(uniqueCallbackNames);
+        // Provide inline success feedback
+        setApiError(null);
         Alert.alert(
           'Success',
           `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
@@ -961,7 +1080,8 @@ function AppContent() {
         throw new Error('Invalid API response format');
       }
     } catch (error: any) {
-      Alert.alert('Error', `Failed to load from API: ${error.message}`);
+      setApiError(error?.message || 'Failed to load from API');
+      console.error('Failed to load from API:', error);
     } finally {
       setIsLoadingAPI(false);
     }
@@ -1245,10 +1365,19 @@ function AppContent() {
             placeholder="API Endpoint URL"
             placeholderTextColor={isDarkMode ? '#999' : '#666'}
             value={apiEndpoint}
-            onChangeText={setApiEndpoint}
+            onChangeText={text => {
+              setApiEndpoint(text);
+              // clear error when user edits
+              if (apiError) setApiError(null);
+            }}
             autoCapitalize="none"
             autoCorrect={false}
           />
+
+          {/* Inline non-blocking error message */}
+          {apiError ? (
+            <Text style={{ color: '#F44336', marginTop: 8 }}>{apiError}</Text>
+          ) : null}
 
           <View style={styles.apiButtonsRow}>
             <TouchableOpacity
@@ -1282,27 +1411,39 @@ function AppContent() {
               </Text>
               <Switch
                 value={autoSyncEnabled}
-                onValueChange={async (enabled) => {
+                onValueChange={async enabled => {
                   // If enabling auto-sync but no callback selected, try to auto-select
                   if (enabled && !selectedCallbackName) {
                     if (apiCallbackNames.length === 1) {
                       const only = apiCallbackNames[0];
                       setSelectedCallbackName(only);
-                      await AsyncStorage.setItem(STORAGE_KEYS.SELECTED_CALLBACK, only);
+                      await AsyncStorage.setItem(
+                        STORAGE_KEYS.SELECTED_CALLBACK,
+                        only,
+                      );
                       await syncUrlsFromApi(only);
                       setAutoSyncEnabled(true);
-                      await AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, 'true');
+                      await AsyncStorage.setItem(
+                        STORAGE_KEYS.AUTO_SYNC_ENABLED,
+                        'true',
+                      );
                       return;
                     }
 
                     // If multiple callbacks available, prompt user to choose
-                    Alert.alert('Select callback', 'Please select a callback before enabling auto-sync');
+                    Alert.alert(
+                      'Select callback',
+                      'Please select a callback before enabling auto-sync',
+                    );
                     setShowAPIModal(true);
                     return;
                   }
 
                   setAutoSyncEnabled(enabled);
-                  await AsyncStorage.setItem(STORAGE_KEYS.AUTO_SYNC_ENABLED, enabled ? 'true' : 'false');
+                  await AsyncStorage.setItem(
+                    STORAGE_KEYS.AUTO_SYNC_ENABLED,
+                    enabled ? 'true' : 'false',
+                  );
                   if (enabled && selectedCallbackName) {
                     await syncUrlsFromApi(selectedCallbackName);
                   }
