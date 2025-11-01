@@ -16,6 +16,7 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
+import { Animated } from 'react-native';
 import {
   StatusBar,
   StyleSheet,
@@ -151,6 +152,11 @@ function AppContent() {
   const appState = useRef(AppState.currentState);
   const lastActivityTime = useRef<Date>(new Date());
 
+  // Scroll button refs and state
+  const scrollViewRef = useRef<ScrollView>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
   // Define callbacks first
   const refreshNetworkInfo = useCallback(async () => {
     try {
@@ -240,7 +246,7 @@ function AppContent() {
     uptime: 0,
     isRunning: false,
   });
-  const [timeUntilNextCheck, setTimeUntilNextCheck] = useState<string>('');
+  const [_timeUntilNextCheck, _setTimeUntilNextCheck] = useState<string>('');
 
   // API integration states
   const [apiEndpoint, setApiEndpoint] = useState('');
@@ -256,21 +262,26 @@ function AppContent() {
 
   // Sync URLs from API for a given callback name (or selected one)
   const syncUrlsFromApi = useCallback(
-    async (callbackNameParam?: string) => {
+    async (callbackNameParam?: string, silentMode = false) => {
       const cbName = callbackNameParam || selectedCallbackName;
+
       try {
         if (!apiEndpoint || !cbName) {
           console.log('[syncUrlsFromApi] Missing apiEndpoint or callback name');
-          setApiError('Missing API endpoint or callback name');
-          return;
+          if (!silentMode) {
+            setApiError('Missing API endpoint or callback name');
+          }
+          return false;
         }
 
-        // Normalize and validate endpoint before fetch
+        // Validate endpoint format before using
         const endpoint = normalizeUrl(apiEndpoint);
         if (!isValidUrl(endpoint)) {
           console.warn('[syncUrlsFromApi] Invalid API endpoint:', apiEndpoint);
-          setApiError('Invalid API endpoint URL');
-          return;
+          if (!silentMode) {
+            setApiError('Invalid API endpoint URL');
+          }
+          return false;
         }
         setIsLoadingAPI(true);
         setApiError(null);
@@ -330,7 +341,7 @@ function AppContent() {
           setIsLoadingAPI(false);
           setApiError(null);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error('Error syncing URLs from API:', error);
         setIsLoadingAPI(false);
         setApiError(error?.message || 'Failed to sync from API');
@@ -397,7 +408,7 @@ function AppContent() {
   const [useNativeService, setUseNativeService] = useState(
     Platform.OS === 'android',
   );
-  const [nativeServiceStats, setNativeServiceStats] = useState({
+  const [_nativeServiceStats, setNativeServiceStats] = useState({
     totalChecks: 0,
     successfulCallbacks: 0,
     failedCallbacks: 0,
@@ -478,7 +489,9 @@ function AppContent() {
       return;
 
     const syncInterval = setInterval(() => {
-      if (selectedCallbackName) syncUrlsFromApi(selectedCallbackName);
+      if (selectedCallbackName) {
+        syncUrlsFromApi(selectedCallbackName, true); // silent mode for background sync
+      }
     }, parseInt(checkInterval, 10) * 60 * 1000); // Sync at the same interval as URL checks
 
     return () => clearInterval(syncInterval);
@@ -508,7 +521,7 @@ function AppContent() {
 
           // Sync URLs if auto-sync is enabled
           if (autoSyncEnabled && selectedCallbackName) {
-            syncUrlsFromApi(selectedCallbackName);
+            syncUrlsFromApi(selectedCallbackName, true); // silent mode for background sync
           }
         }
 
@@ -606,9 +619,36 @@ function AppContent() {
     return `${remainingSeconds}s`;
   };
 
+  // Scroll handling functions
+  const handleScroll = (event: any) => {
+    const scrollPosition = event.nativeEvent.contentOffset.y;
+
+    if (scrollPosition > 300 && !showScrollButton) {
+      setShowScrollButton(true);
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
+    } else if (scrollPosition <= 300 && showScrollButton) {
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }).start(() => setShowScrollButton(false));
+    }
+  };
+
+  const scrollToTop = () => {
+    scrollViewRef.current?.scrollTo({
+      y: 0,
+      animated: true,
+    });
+  };
+
   // Data management functions
 
-  const loadSavedData = async () => {
+  const loadSavedData = useCallback(async () => {
     try {
       const [
         savedUrls,
@@ -662,14 +702,21 @@ function AppContent() {
         setLastCheckTime(new Date(savedLastCheck));
       }
 
-      // Load from API if we have an endpoint
+      // Load from API if we have an endpoint (silent mode to avoid blocking UI)
       if (savedApiEndpoint && savedSelectedCallback) {
-        await loadFromAPI();
+        try {
+          await loadFromAPI(true); // silent mode
+        } catch (error) {
+          console.log(
+            'Non-critical: Failed to load API data on startup:',
+            error,
+          );
+        }
       }
     } catch (error) {
       console.error('Error loading saved data:', error);
     }
-  };
+  }, []);
 
   const saveSavedData = useCallback(async () => {
     try {
@@ -772,9 +819,16 @@ function AppContent() {
 
   const startEnhancedBackgroundService = async () => {
     try {
-      // If auto-sync is enabled, sync before starting service
+      // If auto-sync is enabled, sync before starting service (silent mode)
       if (autoSyncEnabled && selectedCallbackName) {
-        await syncUrlsFromApi(selectedCallbackName);
+        try {
+          await syncUrlsFromApi(selectedCallbackName, true);
+        } catch (error) {
+          console.log(
+            'Non-critical: Failed to sync URLs before starting service:',
+            error,
+          );
+        }
       }
 
       if (urls.length === 0) {
@@ -1037,18 +1091,22 @@ function AppContent() {
   };
 
   // API integration functions
-  const loadFromAPI = async () => {
+  const loadFromAPI = async (silentMode = false) => {
     if (!apiEndpoint) {
       // non-blocking error and focus UI (avoid Alert which may block headless flows)
-      setApiError('Please enter API endpoint URL');
-      return;
+      if (!silentMode) {
+        setApiError('Please enter API endpoint URL');
+      }
+      return false;
     }
 
     // normalize and validate before trying
     const endpoint = normalizeUrl(apiEndpoint);
     if (!isValidUrl(endpoint)) {
-      setApiError('Invalid API endpoint URL');
-      return;
+      if (!silentMode) {
+        setApiError('Invalid API endpoint URL');
+      }
+      return false;
     }
 
     setIsLoadingAPI(true);
@@ -1072,16 +1130,22 @@ function AppContent() {
         setApiCallbackNames(uniqueCallbackNames);
         // Provide inline success feedback
         setApiError(null);
-        Alert.alert(
-          'Success',
-          `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
-        );
+        if (!silentMode) {
+          Alert.alert(
+            'Success',
+            `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
+          );
+        }
+        return true;
       } else {
         throw new Error('Invalid API response format');
       }
     } catch (error: any) {
-      setApiError(error?.message || 'Failed to load from API');
+      if (!silentMode) {
+        setApiError(error?.message || 'Failed to load from API');
+      }
       console.error('Failed to load from API:', error);
+      return false;
     } finally {
       setIsLoadingAPI(false);
     }
@@ -1191,655 +1255,690 @@ function AppContent() {
   };
 
   return (
-    <ScrollView style={containerStyle}>
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={[styles.title, textStyle]}>NetGuard Enhanced</Text>
-          {lastCheckTime && (
-            <Text style={[styles.lastCheckText, textStyle]}>
-              Last check: {formatTimeAgo(lastCheckTime)}
-            </Text>
-          )}
-        </View>
-
-        {/* Enhanced Background Service Status */}
-        <View
-          style={[
-            cardStyle,
-            isEnhancedServiceRunning
-              ? styles.serviceActiveCard
-              : styles.serviceInactiveCard,
-          ]}
-        >
-          <View style={styles.serviceHeader}>
-            <Text style={[styles.serviceTitle, textStyle]}>
-              {isEnhancedServiceRunning
-                ? '🟢 Enhanced Service Active'
-                : '🔴 Enhanced Service Stopped'}
-            </Text>
-            <Switch
-              value={isEnhancedServiceRunning}
-              onValueChange={toggleEnhancedBackgroundService}
-              trackColor={{ false: '#767577', true: '#81b0ff' }}
-              thumbColor={isEnhancedServiceRunning ? '#2196F3' : '#f4f3f4'}
-            />
-          </View>
-
-          {isEnhancedServiceRunning && (
-            <>
-              <Text style={[styles.serviceDescription, textStyle]}>
-                Monitoring {urls.length} URLs every {checkInterval} minutes with
-                enhanced stability
-              </Text>
-              <Text style={[styles.serviceUptime, textStyle]}>
-                Uptime: {formatUptime(serviceStats.uptime)}
-              </Text>
-            </>
-          )}
-
-          {timeUntilNextCheck && isEnhancedServiceRunning && (
-            <Text style={[styles.countdownText, textStyle]}>
-              Next check: {timeUntilNextCheck}
-            </Text>
-          )}
-        </View>
-
-        {/* Service Statistics */}
-        {(serviceStats.totalChecks > 0 || isEnhancedServiceRunning) && (
-          <View style={cardStyle}>
-            <Text style={[styles.sectionTitle, textStyle]}>
-              Enhanced Service Statistics
-            </Text>
-            <View style={styles.statsGrid}>
-              <View style={styles.statItem}>
-                <Text style={[styles.statValue, textStyle]}>
-                  {serviceStats.totalChecks}
-                </Text>
-                <Text style={[styles.statLabel, textStyle]}>Total Checks</Text>
-              </View>
-              <View style={styles.statItem}>
-                <Text
-                  style={[styles.statValue, textStyle, { color: '#4CAF50' }]}
-                >
-                  {serviceStats.successfulCallbacks}
-                </Text>
-                <Text style={[styles.statLabel, textStyle]}>Successful</Text>
-              </View>
-              <View style={styles.statItem}>
-                <Text
-                  style={[styles.statValue, textStyle, { color: '#F44336' }]}
-                >
-                  {serviceStats.failedCallbacks}
-                </Text>
-                <Text style={[styles.statLabel, textStyle]}>Failed</Text>
-              </View>
-            </View>
-            {serviceStats.lastCheckTime && (
-              <Text style={[styles.lastServiceCheck, textStyle]}>
-                Last background check: {serviceStats.lastCheckTime}
+    <View style={containerStyle}>
+      <ScrollView
+        ref={scrollViewRef}
+        style={{ flex: 1 }}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        showsVerticalScrollIndicator={true}
+      >
+        <View style={styles.content}>
+          <View style={styles.header}>
+            <Text style={[styles.title, textStyle]}>NetGuard Enhanced</Text>
+            {lastCheckTime && (
+              <Text style={[styles.lastCheckText, textStyle]}>
+                Last check: {formatTimeAgo(lastCheckTime)}
               </Text>
             )}
           </View>
-        )}
 
-        {/* Native Service Toggle (Android only) */}
-        {Platform.OS === 'android' && (
-          <View style={cardStyle}>
-            <Text style={[styles.sectionTitle, textStyle]}>
-              Service Options
-            </Text>
-            <View style={styles.toggleRow}>
-              <Text style={[styles.toggleLabel, textStyle]}>
-                Use Native Android Service (Recommended)
+          {/* Enhanced Background Service Status */}
+          <View
+            style={[
+              cardStyle,
+              isEnhancedServiceRunning
+                ? styles.serviceActiveCard
+                : styles.serviceInactiveCard,
+            ]}
+          >
+            <View style={styles.serviceHeader}>
+              <Text style={[styles.serviceTitle, textStyle]}>
+                {isEnhancedServiceRunning
+                  ? '🟢 Enhanced Service Active'
+                  : '🔴 Enhanced Service Stopped'}
               </Text>
               <Switch
-                value={useNativeService}
-                onValueChange={setUseNativeService}
+                value={isEnhancedServiceRunning}
+                onValueChange={toggleEnhancedBackgroundService}
                 trackColor={{ false: '#767577', true: '#81b0ff' }}
-                thumbColor={useNativeService ? '#2196F3' : '#f4f3f4'}
+                thumbColor={isEnhancedServiceRunning ? '#2196F3' : '#f4f3f4'}
               />
             </View>
-            <Text style={[styles.toggleDescription, textStyle]}>
-              Native service provides better background stability and battery
-              optimization
-            </Text>
-          </View>
-        )}
 
-        {/* Network Status */}
-        <View style={cardStyle}>
-          <Text style={[styles.sectionTitle, textStyle]}>Network Status</Text>
-          <View style={styles.networkInfoContainer}>
-            <View style={styles.networkRow}>
-              <Text style={[styles.networkLabel, textStyle]}>Type:</Text>
-              <Text
-                style={[
-                  styles.networkValue,
-                  textStyle,
-                  {
-                    color:
-                      networkInfo.type !== 'Unknown' ? '#4CAF50' : '#FF9800',
-                  },
-                ]}
-              >
-                {networkInfo.carrier}
+            {isEnhancedServiceRunning && (
+              <>
+                <Text style={[styles.serviceDescription, textStyle]}>
+                  Monitoring {urls.length} URLs every {checkInterval} minutes
+                  with enhanced stability
+                </Text>
+                <Text style={[styles.serviceUptime, textStyle]}>
+                  Uptime: {formatUptime(serviceStats.uptime)}
+                </Text>
+              </>
+            )}
+
+            {_timeUntilNextCheck && isEnhancedServiceRunning && (
+              <Text style={[styles.countdownText, textStyle]}>
+                Next check: {_timeUntilNextCheck}
+              </Text>
+            )}
+          </View>
+
+          {/* Service Statistics */}
+          {(serviceStats.totalChecks > 0 || isEnhancedServiceRunning) && (
+            <View style={cardStyle}>
+              <Text style={[styles.sectionTitle, textStyle]}>
+                Enhanced Service Statistics
+              </Text>
+              <View style={styles.statsGrid}>
+                <View style={styles.statItem}>
+                  <Text style={[styles.statValue, textStyle]}>
+                    {serviceStats.totalChecks}
+                  </Text>
+                  <Text style={[styles.statLabel, textStyle]}>
+                    Total Checks
+                  </Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Text
+                    style={[styles.statValue, textStyle, { color: '#4CAF50' }]}
+                  >
+                    {serviceStats.successfulCallbacks}
+                  </Text>
+                  <Text style={[styles.statLabel, textStyle]}>Successful</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Text
+                    style={[styles.statValue, textStyle, { color: '#F44336' }]}
+                  >
+                    {serviceStats.failedCallbacks}
+                  </Text>
+                  <Text style={[styles.statLabel, textStyle]}>Failed</Text>
+                </View>
+              </View>
+              {serviceStats.lastCheckTime && (
+                <Text style={[styles.lastServiceCheck, textStyle]}>
+                  Last background check: {serviceStats.lastCheckTime}
+                </Text>
+              )}
+            </View>
+          )}
+
+          {/* Native Service Toggle (Android only) */}
+          {Platform.OS === 'android' && (
+            <View style={cardStyle}>
+              <Text style={[styles.sectionTitle, textStyle]}>
+                Service Options
+              </Text>
+              <View style={styles.toggleRow}>
+                <Text style={[styles.toggleLabel, textStyle]}>
+                  Use Native Android Service (Recommended)
+                </Text>
+                <Switch
+                  value={useNativeService}
+                  onValueChange={setUseNativeService}
+                  trackColor={{ false: '#767577', true: '#81b0ff' }}
+                  thumbColor={useNativeService ? '#2196F3' : '#f4f3f4'}
+                />
+              </View>
+              <Text style={[styles.toggleDescription, textStyle]}>
+                Native service provides better background stability and battery
+                optimization
               </Text>
             </View>
-            <View style={styles.networkRow}>
-              <Text style={[styles.networkLabel, textStyle]}>Status:</Text>
-              <View style={styles.connectionStatus}>
-                <View
+          )}
+
+          {/* Network Status */}
+          <View style={cardStyle}>
+            <Text style={[styles.sectionTitle, textStyle]}>Network Status</Text>
+            <View style={styles.networkInfoContainer}>
+              <View style={styles.networkRow}>
+                <Text style={[styles.networkLabel, textStyle]}>Type:</Text>
+                <Text
                   style={[
-                    styles.connectionIndicator,
+                    styles.networkValue,
+                    textStyle,
                     {
-                      backgroundColor: networkInfo.isConnected
-                        ? '#4CAF50'
-                        : '#F44336',
+                      color:
+                        networkInfo.type !== 'Unknown' ? '#4CAF50' : '#FF9800',
                     },
                   ]}
-                />
-                <Text style={[styles.networkValue, textStyle]}>
-                  {networkInfo.isConnected ? 'Connected' : 'Disconnected'}
+                >
+                  {networkInfo.carrier}
                 </Text>
               </View>
+              <View style={styles.networkRow}>
+                <Text style={[styles.networkLabel, textStyle]}>Status:</Text>
+                <View style={styles.connectionStatus}>
+                  <View
+                    style={[
+                      styles.connectionIndicator,
+                      {
+                        backgroundColor: networkInfo.isConnected
+                          ? '#4CAF50'
+                          : '#F44336',
+                      },
+                    ]}
+                  />
+                  <Text style={[styles.networkValue, textStyle]}>
+                    {networkInfo.isConnected ? 'Connected' : 'Disconnected'}
+                  </Text>
+                </View>
+              </View>
             </View>
-          </View>
-          <TouchableOpacity
-            style={styles.refreshButton}
-            onPress={refreshNetworkInfo}
-          >
-            <Text style={styles.refreshButtonText}>Refresh Network Info</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* API Configuration Section */}
-        <View style={cardStyle}>
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, textStyle]}>
-              API Configuration
-            </Text>
-          </View>
-
-          <TextInput
-            style={inputStyle}
-            placeholder="API Endpoint URL"
-            placeholderTextColor={isDarkMode ? '#999' : '#666'}
-            value={apiEndpoint}
-            onChangeText={text => {
-              setApiEndpoint(text);
-              // clear error when user edits
-              if (apiError) setApiError(null);
-            }}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-
-          {/* Inline non-blocking error message */}
-          {apiError ? (
-            <Text style={{ color: '#F44336', marginTop: 8 }}>{apiError}</Text>
-          ) : null}
-
-          <View style={styles.apiButtonsRow}>
             <TouchableOpacity
-              style={[styles.apiButton, isLoadingAPI && styles.buttonDisabled]}
-              onPress={loadFromAPI}
-              disabled={isLoadingAPI}
+              style={styles.refreshButton}
+              onPress={refreshNetworkInfo}
             >
-              {isLoadingAPI ? (
-                <ActivityIndicator color="white" size="small" />
-              ) : (
-                <Text style={styles.buttonText}>Load from API</Text>
-              )}
+              <Text style={styles.refreshButtonText}>Refresh Network Info</Text>
             </TouchableOpacity>
-
-            {apiCallbackNames.length > 0 && (
-              <TouchableOpacity
-                style={styles.apiButton}
-                onPress={() => setShowAPIModal(true)}
-              >
-                <Text style={styles.buttonText}>
-                  Select Callback ({apiCallbackNames.length})
-                </Text>
-              </TouchableOpacity>
-            )}
           </View>
 
-          {selectedCallbackName && (
-            <View style={[styles.toggleRow, styles.marginTop]}>
-              <Text style={[styles.toggleLabel, textStyle]}>
-                Auto-sync URLs from API
+          {/* API Configuration Section */}
+          <View style={cardStyle}>
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, textStyle]}>
+                API Configuration
               </Text>
-              <Switch
-                value={autoSyncEnabled}
-                onValueChange={async enabled => {
-                  // If enabling auto-sync but no callback selected, try to auto-select
-                  if (enabled && !selectedCallbackName) {
-                    if (apiCallbackNames.length === 1) {
-                      const only = apiCallbackNames[0];
-                      setSelectedCallbackName(only);
-                      await AsyncStorage.setItem(
-                        STORAGE_KEYS.SELECTED_CALLBACK,
-                        only,
-                      );
-                      await syncUrlsFromApi(only);
-                      setAutoSyncEnabled(true);
-                      await AsyncStorage.setItem(
-                        STORAGE_KEYS.AUTO_SYNC_ENABLED,
-                        'true',
-                      );
-                      return;
-                    }
-
-                    // If multiple callbacks available, prompt user to choose
-                    Alert.alert(
-                      'Select callback',
-                      'Please select a callback before enabling auto-sync',
-                    );
-                    setShowAPIModal(true);
-                    return;
-                  }
-
-                  setAutoSyncEnabled(enabled);
-                  await AsyncStorage.setItem(
-                    STORAGE_KEYS.AUTO_SYNC_ENABLED,
-                    enabled ? 'true' : 'false',
-                  );
-                  if (enabled && selectedCallbackName) {
-                    await syncUrlsFromApi(selectedCallbackName);
-                  }
-                }}
-                trackColor={{ false: '#767577', true: '#81b0ff' }}
-                thumbColor={autoSyncEnabled ? '#2196F3' : '#f4f3f4'}
-              />
             </View>
-          )}
 
-          {selectedCallbackName && (
-            <Text style={[styles.selectedCallbackText, textStyle]}>
-              Current: {selectedCallbackName}
-            </Text>
-          )}
-        </View>
-
-        {/* URL Input Section */}
-        <View style={cardStyle}>
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, textStyle]}>
-              URLs to Monitor ({urls.length})
-            </Text>
-            {urls.length > 0 && (
-              <TouchableOpacity onPress={clearAllData}>
-                <Text style={styles.clearText}>Clear All</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          <View style={styles.inputRow}>
             <TextInput
-              style={[inputStyle, styles.urlInput]}
-              placeholder="Enter URL (e.g. google.com)"
+              style={inputStyle}
+              placeholder="API Endpoint URL"
               placeholderTextColor={isDarkMode ? '#999' : '#666'}
-              value={newUrl}
-              onChangeText={setNewUrl}
+              value={apiEndpoint}
+              onChangeText={text => {
+                setApiEndpoint(text);
+                // clear error when user edits
+                if (apiError) setApiError(null);
+              }}
               autoCapitalize="none"
               autoCorrect={false}
             />
-            <TouchableOpacity style={styles.addButton} onPress={addUrl}>
-              <Text style={styles.buttonText}>Add</Text>
-            </TouchableOpacity>
+
+            {/* Inline non-blocking error message */}
+            {apiError ? (
+              <Text style={{ color: '#F44336', marginTop: 8 }}>{apiError}</Text>
+            ) : null}
+
+            <View style={styles.apiButtonsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.apiButton,
+                  isLoadingAPI && styles.buttonDisabled,
+                ]}
+                onPress={() => loadFromAPI(false)}
+                disabled={isLoadingAPI}
+              >
+                {isLoadingAPI ? (
+                  <ActivityIndicator color="white" size="small" />
+                ) : (
+                  <Text style={styles.buttonText}>Load from API</Text>
+                )}
+              </TouchableOpacity>
+
+              {apiCallbackNames.length > 0 && (
+                <TouchableOpacity
+                  style={styles.apiButton}
+                  onPress={() => setShowAPIModal(true)}
+                >
+                  <Text style={styles.buttonText}>
+                    Select Callback ({apiCallbackNames.length})
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {selectedCallbackName && (
+              <View style={[styles.toggleRow, styles.marginTop]}>
+                <Text style={[styles.toggleLabel, textStyle]}>
+                  Auto-sync URLs from API
+                </Text>
+                <Switch
+                  value={autoSyncEnabled}
+                  onValueChange={async enabled => {
+                    // If enabling auto-sync but no callback selected, try to auto-select
+                    if (enabled && !selectedCallbackName) {
+                      if (apiCallbackNames.length === 1) {
+                        const only = apiCallbackNames[0];
+                        setSelectedCallbackName(only);
+                        await AsyncStorage.setItem(
+                          STORAGE_KEYS.SELECTED_CALLBACK,
+                          only,
+                        );
+                        await syncUrlsFromApi(only, false); // user-initiated, not silent
+                        setAutoSyncEnabled(true);
+                        await AsyncStorage.setItem(
+                          STORAGE_KEYS.AUTO_SYNC_ENABLED,
+                          'true',
+                        );
+                        return;
+                      }
+
+                      // If multiple callbacks available, prompt user to choose
+                      Alert.alert(
+                        'Select callback',
+                        'Please select a callback before enabling auto-sync',
+                      );
+                      setShowAPIModal(true);
+                      return;
+                    }
+
+                    setAutoSyncEnabled(enabled);
+                    await AsyncStorage.setItem(
+                      STORAGE_KEYS.AUTO_SYNC_ENABLED,
+                      enabled ? 'true' : 'false',
+                    );
+                    if (enabled && selectedCallbackName) {
+                      await syncUrlsFromApi(selectedCallbackName, false); // user-initiated, not silent
+                    }
+                  }}
+                  trackColor={{ false: '#767577', true: '#81b0ff' }}
+                  thumbColor={autoSyncEnabled ? '#2196F3' : '#f4f3f4'}
+                />
+              </View>
+            )}
+
+            {selectedCallbackName && (
+              <Text style={[styles.selectedCallbackText, textStyle]}>
+                Current: {selectedCallbackName}
+              </Text>
+            )}
           </View>
 
-          {/* URL List */}
-          {sortedUrls.map(url => (
-            <View key={url.id} style={styles.urlItem}>
-              <View style={styles.urlInfo}>
-                <Text style={[styles.urlText, textStyle]} numberOfLines={1}>
-                  {url.url}
+          {/* URL Input Section */}
+          <View style={cardStyle}>
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, textStyle]}>
+                URLs to Monitor ({urls.length})
+              </Text>
+              {urls.length > 0 && (
+                <TouchableOpacity onPress={clearAllData}>
+                  <Text style={styles.clearText}>Clear All</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View style={styles.inputRow}>
+              <TextInput
+                style={[inputStyle, styles.urlInput]}
+                placeholder="Enter URL (e.g. google.com)"
+                placeholderTextColor={isDarkMode ? '#999' : '#666'}
+                value={newUrl}
+                onChangeText={setNewUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity style={styles.addButton} onPress={addUrl}>
+                <Text style={styles.buttonText}>Add</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* URL List */}
+            {sortedUrls.map(url => (
+              <View key={url.id} style={styles.urlItem}>
+                <View style={styles.urlInfo}>
+                  <Text style={[styles.urlText, textStyle]} numberOfLines={1}>
+                    {url.url}
+                  </Text>
+                  <View style={styles.statusRow}>
+                    <View
+                      style={[
+                        styles.statusIndicator,
+                        {
+                          backgroundColor:
+                            url.status === 'active'
+                              ? '#4CAF50'
+                              : url.status === 'inactive'
+                              ? '#F44336'
+                              : '#FFC107',
+                        },
+                      ]}
+                    />
+                    <Text style={[styles.statusText, textStyle]}>
+                      {url.status || 'Unknown'}
+                    </Text>
+                    {url.lastChecked && (
+                      <Text style={[styles.lastCheckedText, textStyle]}>
+                        {` • ${formatTimeAgo(url.lastChecked)}`}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+                <TouchableOpacity onPress={() => removeUrl(url.id)}>
+                  <Text style={styles.removeText}>Remove</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+
+            {urls.length === 0 && (
+              <Text style={[styles.emptyText, textStyle]}>
+                No URLs added yet
+              </Text>
+            )}
+          </View>
+
+          {/* Callback Configuration */}
+          <View style={cardStyle}>
+            <Text style={[styles.sectionTitle, textStyle]}>
+              Callback Configuration
+            </Text>
+            <TextInput
+              style={inputStyle}
+              placeholder="Callback Name"
+              placeholderTextColor={isDarkMode ? '#999' : '#666'}
+              value={callbackConfig.name}
+              onChangeText={text =>
+                setCallbackConfig(prev => ({ ...prev, name: text }))
+              }
+            />
+            <TextInput
+              style={[inputStyle, styles.marginTop]}
+              placeholder="Callback URL (e.g. webhook.site/...)"
+              placeholderTextColor={isDarkMode ? '#999' : '#666'}
+              value={callbackConfig.url}
+              onChangeText={text =>
+                setCallbackConfig(prev => ({ ...prev, url: text }))
+              }
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity
+              style={[styles.button, styles.marginTop]}
+              onPress={saveCallbackConfig}
+            >
+              <Text style={styles.buttonText}>Save Callback</Text>
+            </TouchableOpacity>
+
+            {/* Last Callback Info */}
+            {lastCallback && (
+              <View style={styles.callbackHistory}>
+                <Text style={[styles.callbackHistoryTitle, textStyle]}>
+                  Last Callback:
                 </Text>
-                <View style={styles.statusRow}>
+                <Text style={[styles.callbackHistoryText, textStyle]}>
+                  Time: {formatDateTime(lastCallback.timestamp)}
+                </Text>
+                <Text style={[styles.callbackHistoryText, textStyle]}>
+                  Total URLs: {lastCallback.totalUrls} (
+                  <Text style={{ color: '#4CAF50', fontWeight: 'bold' }}>
+                    {lastCallback.activeCount} active
+                  </Text>
+                  ,{' '}
+                  <Text style={{ color: '#F44336', fontWeight: 'bold' }}>
+                    {lastCallback.inactiveCount} inactive
+                  </Text>
+                  )
+                </Text>
+                <Text style={[styles.callbackHistoryText, textStyle]}>
+                  Status:{' '}
+                  <Text
+                    style={{
+                      color: lastCallback.success ? '#4CAF50' : '#F44336',
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {lastCallback.success ? 'Success' : 'Failed'}
+                  </Text>
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Check Interval Settings */}
+          <View style={cardStyle}>
+            <Text style={[styles.sectionTitle, textStyle]}>
+              Check Interval Settings
+            </Text>
+
+            <View style={styles.inputRow}>
+              <TextInput
+                style={[inputStyle, styles.intervalInput]}
+                placeholder="Interval (minutes)"
+                placeholderTextColor={isDarkMode ? '#999' : '#666'}
+                value={checkInterval}
+                onChangeText={setCheckInterval}
+                keyboardType="numeric"
+              />
+              <TouchableOpacity style={styles.button} onPress={saveInterval}>
+                <Text style={styles.buttonText}>Set Interval</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Enhanced Service Tips */}
+            <View style={styles.androidTips}>
+              <Text style={[styles.androidTipsTitle, textStyle]}>
+                💡 Enhanced Service Features:
+              </Text>
+              <Text style={[styles.androidTipsText, textStyle]}>
+                • Native background execution for better reliability
+              </Text>
+              <Text style={[styles.androidTipsText, textStyle]}>
+                • Automatic service restart on failure
+              </Text>
+              <Text style={[styles.androidTipsText, textStyle]}>
+                • Callback retry mechanism with queue
+              </Text>
+              <Text style={[styles.androidTipsText, textStyle]}>
+                • Health monitoring and statistics
+              </Text>
+            </View>
+          </View>
+
+          {/* Manual Check Button */}
+          <TouchableOpacity
+            style={[styles.checkButton, isLoading && styles.buttonDisabled]}
+            onPress={performManualCheck}
+            disabled={isLoading || urls.length === 0}
+          >
+            {isLoading ? (
+              <ActivityIndicator color="white" />
+            ) : (
+              <Text style={styles.checkButtonText}>
+                {useNativeService && Platform.OS === 'android'
+                  ? 'Native Manual Check'
+                  : 'Manual Check (Limited)'}
+              </Text>
+            )}
+          </TouchableOpacity>
+
+          {/* Service Logs Button (Debug) */}
+          {__DEV__ && serviceLogs.length > 0 && (
+            <TouchableOpacity
+              style={styles.debugButton}
+              onPress={() => setShowServiceLogs(true)}
+            >
+              <Text style={styles.buttonText}>
+                View Service Logs ({serviceLogs.length})
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Last Results Display */}
+          {lastResults.length > 0 && (
+            <View style={cardStyle}>
+              <Text style={[styles.sectionTitle, textStyle]}>
+                Last Background Check Results
+              </Text>
+              {lastResults.slice(0, 5).map((result, index) => (
+                <View key={index} style={styles.resultItem}>
                   <View
                     style={[
                       styles.statusIndicator,
                       {
                         backgroundColor:
-                          url.status === 'active'
-                            ? '#4CAF50'
-                            : url.status === 'inactive'
-                            ? '#F44336'
-                            : '#FFC107',
+                          result.status === 'active' ? '#4CAF50' : '#F44336',
                       },
                     ]}
                   />
-                  <Text style={[styles.statusText, textStyle]}>
-                    {url.status || 'Unknown'}
+                  <Text style={[styles.resultUrl, textStyle]} numberOfLines={1}>
+                    {result.url}
                   </Text>
-                  {url.lastChecked && (
-                    <Text style={[styles.lastCheckedText, textStyle]}>
-                      {` • ${formatTimeAgo(url.lastChecked)}`}
-                    </Text>
-                  )}
+                  <Text style={[styles.resultTime, textStyle]}>
+                    {result.responseTime}ms
+                  </Text>
                 </View>
-              </View>
-              <TouchableOpacity onPress={() => removeUrl(url.id)}>
-                <Text style={styles.removeText}>Remove</Text>
-              </TouchableOpacity>
-            </View>
-          ))}
-
-          {urls.length === 0 && (
-            <Text style={[styles.emptyText, textStyle]}>No URLs added yet</Text>
-          )}
-        </View>
-
-        {/* Callback Configuration */}
-        <View style={cardStyle}>
-          <Text style={[styles.sectionTitle, textStyle]}>
-            Callback Configuration
-          </Text>
-          <TextInput
-            style={inputStyle}
-            placeholder="Callback Name"
-            placeholderTextColor={isDarkMode ? '#999' : '#666'}
-            value={callbackConfig.name}
-            onChangeText={text =>
-              setCallbackConfig(prev => ({ ...prev, name: text }))
-            }
-          />
-          <TextInput
-            style={[inputStyle, styles.marginTop]}
-            placeholder="Callback URL (e.g. webhook.site/...)"
-            placeholderTextColor={isDarkMode ? '#999' : '#666'}
-            value={callbackConfig.url}
-            onChangeText={text =>
-              setCallbackConfig(prev => ({ ...prev, url: text }))
-            }
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity
-            style={[styles.button, styles.marginTop]}
-            onPress={saveCallbackConfig}
-          >
-            <Text style={styles.buttonText}>Save Callback</Text>
-          </TouchableOpacity>
-
-          {/* Last Callback Info */}
-          {lastCallback && (
-            <View style={styles.callbackHistory}>
-              <Text style={[styles.callbackHistoryTitle, textStyle]}>
-                Last Callback:
-              </Text>
-              <Text style={[styles.callbackHistoryText, textStyle]}>
-                Time: {formatDateTime(lastCallback.timestamp)}
-              </Text>
-              <Text style={[styles.callbackHistoryText, textStyle]}>
-                Total URLs: {lastCallback.totalUrls} (
-                <Text style={{ color: '#4CAF50', fontWeight: 'bold' }}>
-                  {lastCallback.activeCount} active
+              ))}
+              {lastResults.length > 5 && (
+                <Text style={[styles.moreResults, textStyle]}>
+                  ... and {lastResults.length - 5} more
                 </Text>
-                ,{' '}
-                <Text style={{ color: '#F44336', fontWeight: 'bold' }}>
-                  {lastCallback.inactiveCount} inactive
-                </Text>
-                )
-              </Text>
-              <Text style={[styles.callbackHistoryText, textStyle]}>
-                Status:{' '}
-                <Text
-                  style={{
-                    color: lastCallback.success ? '#4CAF50' : '#F44336',
-                    fontWeight: 'bold',
-                  }}
-                >
-                  {lastCallback.success ? 'Success' : 'Failed'}
-                </Text>
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* Check Interval Settings */}
-        <View style={cardStyle}>
-          <Text style={[styles.sectionTitle, textStyle]}>
-            Check Interval Settings
-          </Text>
-
-          <View style={styles.inputRow}>
-            <TextInput
-              style={[inputStyle, styles.intervalInput]}
-              placeholder="Interval (minutes)"
-              placeholderTextColor={isDarkMode ? '#999' : '#666'}
-              value={checkInterval}
-              onChangeText={setCheckInterval}
-              keyboardType="numeric"
-            />
-            <TouchableOpacity style={styles.button} onPress={saveInterval}>
-              <Text style={styles.buttonText}>Set Interval</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Enhanced Service Tips */}
-          <View style={styles.androidTips}>
-            <Text style={[styles.androidTipsTitle, textStyle]}>
-              💡 Enhanced Service Features:
-            </Text>
-            <Text style={[styles.androidTipsText, textStyle]}>
-              • Native background execution for better reliability
-            </Text>
-            <Text style={[styles.androidTipsText, textStyle]}>
-              • Automatic service restart on failure
-            </Text>
-            <Text style={[styles.androidTipsText, textStyle]}>
-              • Callback retry mechanism with queue
-            </Text>
-            <Text style={[styles.androidTipsText, textStyle]}>
-              • Health monitoring and statistics
-            </Text>
-          </View>
-        </View>
-
-        {/* Manual Check Button */}
-        <TouchableOpacity
-          style={[styles.checkButton, isLoading && styles.buttonDisabled]}
-          onPress={performManualCheck}
-          disabled={isLoading || urls.length === 0}
-        >
-          {isLoading ? (
-            <ActivityIndicator color="white" />
-          ) : (
-            <Text style={styles.checkButtonText}>
-              {useNativeService && Platform.OS === 'android'
-                ? 'Native Manual Check'
-                : 'Manual Check (Limited)'}
-            </Text>
-          )}
-        </TouchableOpacity>
-
-        {/* Service Logs Button (Debug) */}
-        {__DEV__ && serviceLogs.length > 0 && (
-          <TouchableOpacity
-            style={styles.debugButton}
-            onPress={() => setShowServiceLogs(true)}
-          >
-            <Text style={styles.buttonText}>
-              View Service Logs ({serviceLogs.length})
-            </Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Last Results Display */}
-        {lastResults.length > 0 && (
-          <View style={cardStyle}>
-            <Text style={[styles.sectionTitle, textStyle]}>
-              Last Background Check Results
-            </Text>
-            {lastResults.slice(0, 5).map((result, index) => (
-              <View key={index} style={styles.resultItem}>
-                <View
-                  style={[
-                    styles.statusIndicator,
-                    {
-                      backgroundColor:
-                        result.status === 'active' ? '#4CAF50' : '#F44336',
-                    },
-                  ]}
-                />
-                <Text style={[styles.resultUrl, textStyle]} numberOfLines={1}>
-                  {result.url}
-                </Text>
-                <Text style={[styles.resultTime, textStyle]}>
-                  {result.responseTime}ms
-                </Text>
-              </View>
-            ))}
-            {lastResults.length > 5 && (
-              <Text style={[styles.moreResults, textStyle]}>
-                ... and {lastResults.length - 5} more
-              </Text>
-            )}
-          </View>
-        )}
-
-        {/* Info Note */}
-        <View style={styles.infoNote}>
-          <Text style={[styles.infoNoteText, textStyle]}>
-            ℹ️ NetGuard Enhanced uses multiple background strategies:
-            {'\n\n'}
-            🔄 Native Android services for maximum reliability
-            {'\n'}
-            📱 AlarmManager for scheduled checks
-            {'\n'}
-            🔋 Battery optimization handling
-            {'\n'}
-            📡 Automatic recovery and restart mechanisms
-          </Text>
-        </View>
-      </View>
-
-      {/* API Callback Selection Modal */}
-      <Modal
-        visible={showAPIModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowAPIModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View
-            style={[
-              styles.modalContent,
-              { backgroundColor: isDarkMode ? '#2a2a2a' : 'white' },
-            ]}
-          >
-            <Text style={[styles.modalTitle, textStyle]}>Select Callback</Text>
-
-            <FlatList
-              data={apiCallbackNames}
-              keyExtractor={item => item}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.modalItem}
-                  onPress={() => loadURLsForCallback(item)}
-                >
-                  <Text style={[styles.modalItemText, textStyle]}>{item}</Text>
-                  <Text style={[styles.modalItemCount, textStyle]}>
-                    {apiData.filter(d => d.callback_name === item).length} URLs
-                  </Text>
-                </TouchableOpacity>
               )}
-              style={styles.modalList}
-            />
+            </View>
+          )}
 
-            <TouchableOpacity
-              style={styles.modalCloseButton}
-              onPress={() => setShowAPIModal(false)}
-            >
-              <Text style={styles.modalCloseButtonText}>Cancel</Text>
-            </TouchableOpacity>
+          {/* Info Note */}
+          <View style={styles.infoNote}>
+            <Text style={[styles.infoNoteText, textStyle]}>
+              ℹ️ NetGuard Enhanced uses multiple background strategies:
+              {'\n\n'}
+              🔄 Native Android services for maximum reliability
+              {'\n'}
+              📱 AlarmManager for scheduled checks
+              {'\n'}
+              🔋 Battery optimization handling
+              {'\n'}
+              📡 Automatic recovery and restart mechanisms
+            </Text>
           </View>
         </View>
-      </Modal>
 
-      {/* Service Logs Modal */}
-      {showServiceLogs && (
+        {/* API Callback Selection Modal */}
         <Modal
-          visible={showServiceLogs}
+          visible={showAPIModal}
           animationType="slide"
           transparent={true}
-          onRequestClose={() => setShowServiceLogs(false)}
+          onRequestClose={() => setShowAPIModal(false)}
         >
           <View style={styles.modalOverlay}>
             <View
               style={[
                 styles.modalContent,
-                {
-                  backgroundColor: isDarkMode ? '#2a2a2a' : 'white',
-                  maxHeight: '80%',
-                },
+                { backgroundColor: isDarkMode ? '#2a2a2a' : 'white' },
               ]}
             >
-              <Text
-                style={[
-                  styles.modalTitle,
-                  { color: isDarkMode ? 'white' : 'black' },
-                ]}
-              >
-                Enhanced Service Logs
+              <Text style={[styles.modalTitle, textStyle]}>
+                Select Callback
               </Text>
-              <ScrollView style={{ maxHeight: 400 }}>
-                {serviceLogs
-                  .slice(-50)
-                  .reverse()
-                  .map((log, index) => (
-                    <View
-                      key={index}
-                      style={{
-                        padding: 8,
-                        borderBottomWidth: 1,
-                        borderBottomColor: '#eee',
-                      }}
-                    >
-                      <Text style={{ fontSize: 10, color: '#666' }}>
-                        {log.timestamp}
-                      </Text>
-                      <Text
-                        style={{
-                          fontSize: 12,
-                          color: isDarkMode ? 'white' : 'black',
-                        }}
-                      >
-                        {log.message}
-                      </Text>
-                      {log.data && (
-                        <Text style={{ fontSize: 10, color: '#888' }}>
-                          {typeof log.data === 'string'
-                            ? log.data
-                            : JSON.stringify(log.data)}
-                        </Text>
-                      )}
-                    </View>
-                  ))}
-              </ScrollView>
+
+              <FlatList
+                data={apiCallbackNames}
+                keyExtractor={item => item}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.modalItem}
+                    onPress={() => loadURLsForCallback(item)}
+                  >
+                    <Text style={[styles.modalItemText, textStyle]}>
+                      {item}
+                    </Text>
+                    <Text style={[styles.modalItemCount, textStyle]}>
+                      {apiData.filter(d => d.callback_name === item).length}{' '}
+                      URLs
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                style={styles.modalList}
+              />
+
               <TouchableOpacity
-                style={[styles.modalCloseButton, { marginTop: 10 }]}
-                onPress={() => setShowServiceLogs(false)}
+                style={styles.modalCloseButton}
+                onPress={() => setShowAPIModal(false)}
               >
-                <Text style={styles.modalCloseButtonText}>Close</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, { marginTop: 10 }]}
-                onPress={async () => {
-                  await backgroundService.clearServiceLogs();
-                  setServiceLogs([]);
-                  Alert.alert('Success', 'Service logs cleared');
-                }}
-              >
-                <Text style={styles.buttonText}>Clear Logs</Text>
+                <Text style={styles.modalCloseButtonText}>Cancel</Text>
               </TouchableOpacity>
             </View>
           </View>
         </Modal>
+
+        {/* Service Logs Modal */}
+        {showServiceLogs && (
+          <Modal
+            visible={showServiceLogs}
+            animationType="slide"
+            transparent={true}
+            onRequestClose={() => setShowServiceLogs(false)}
+          >
+            <View style={styles.modalOverlay}>
+              <View
+                style={[
+                  styles.modalContent,
+                  {
+                    backgroundColor: isDarkMode ? '#2a2a2a' : 'white',
+                    maxHeight: '80%',
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.modalTitle,
+                    { color: isDarkMode ? 'white' : 'black' },
+                  ]}
+                >
+                  Enhanced Service Logs
+                </Text>
+                <ScrollView style={{ maxHeight: 400 }}>
+                  {serviceLogs
+                    .slice(-50)
+                    .reverse()
+                    .map((log, index) => (
+                      <View
+                        key={index}
+                        style={{
+                          padding: 8,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#eee',
+                        }}
+                      >
+                        <Text style={{ fontSize: 10, color: '#666' }}>
+                          {log.timestamp}
+                        </Text>
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            color: isDarkMode ? 'white' : 'black',
+                          }}
+                        >
+                          {log.message}
+                        </Text>
+                        {log.data && (
+                          <Text style={{ fontSize: 10, color: '#888' }}>
+                            {typeof log.data === 'string'
+                              ? log.data
+                              : JSON.stringify(log.data)}
+                          </Text>
+                        )}
+                      </View>
+                    ))}
+                </ScrollView>
+                <TouchableOpacity
+                  style={[styles.modalCloseButton, { marginTop: 10 }]}
+                  onPress={() => setShowServiceLogs(false)}
+                >
+                  <Text style={styles.modalCloseButtonText}>Close</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.button, { marginTop: 10 }]}
+                  onPress={async () => {
+                    await backgroundService.clearServiceLogs();
+                    setServiceLogs([]);
+                    Alert.alert('Success', 'Service logs cleared');
+                  }}
+                >
+                  <Text style={styles.buttonText}>Clear Logs</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+        )}
+      </ScrollView>
+
+      {/* Scroll to Top Button */}
+      {showScrollButton && (
+        <Animated.View
+          style={[styles.scrollToTopButton, { opacity: fadeAnim }]}
+        >
+          <TouchableOpacity
+            onPress={scrollToTop}
+            style={styles.scrollButton}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.scrollButtonText}>↑</Text>
+          </TouchableOpacity>
+        </Animated.View>
       )}
-    </ScrollView>
+    </View>
   );
 }
 
@@ -2243,7 +2342,30 @@ const styles = StyleSheet.create({
   modalCloseButtonText: {
     color: 'white',
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
+  },
+  scrollToTopButton: {
+    position: 'absolute',
+    right: 20,
+    bottom: 30,
+  },
+  scrollButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#2196F3',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+  },
+  scrollButtonText: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: 'bold',
   },
 });
 
