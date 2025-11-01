@@ -28,8 +28,9 @@ interface NetworkInfo {
   type: string;
   carrier: string;
   isConnected: boolean;
-  isWifiEnabled?: boolean;
-  isMobileEnabled?: boolean;
+  isWifiEnabled: boolean;
+  isMobileEnabled: boolean;
+  displayName: string;
 }
 
 interface CallbackConfig {
@@ -299,7 +300,27 @@ class EnhancedBackgroundService {
   }
 
   private async backgroundTaskFunction(taskData: any) {
-    const config = taskData.parameters?.config as BackgroundServiceConfig;
+    // Prefer config passed via parameters, but fall back to stored service config
+    let config = taskData?.parameters?.config as BackgroundServiceConfig;
+
+    if (!config) {
+      try {
+        this.log(
+          'Background task: No config in parameters, attempting to load from storage',
+        );
+        const stored = await AsyncStorage.getItem(STORAGE_KEYS.SERVICE_CONFIG);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          // stored state shape may include config inside an object
+          config = parsed.config
+            ? (parsed.config as BackgroundServiceConfig)
+            : (parsed as BackgroundServiceConfig);
+        }
+      } catch (e) {
+        this.log('Background task: Error loading config from storage', e);
+      }
+    }
+
     if (!config) {
       this.log('Background task: No config provided');
       return;
@@ -555,6 +576,14 @@ class EnhancedBackgroundService {
     }
 
     const deviceInfo = await this.getDeviceInfo();
+    const networkInfo = await this.getNetworkInfo();
+
+    // อ่าน URLs ที่ใช้ล่าสุดจาก storage
+    const lastUsedUrls = await AsyncStorage.getItem('@Enhanced:lastUsedUrls');
+    const totalUrls = lastUsedUrls
+      ? JSON.parse(lastUsedUrls).length
+      : results.length;
+
     const activeCount = results.filter(r => r.status === 'active').length;
     const inactiveCount = results.filter(r => r.status === 'inactive').length;
 
@@ -564,12 +593,13 @@ class EnhancedBackgroundService {
       isBackground: true,
       serviceVersion: '2.0',
       summary: {
-        total: results.length,
+        total: totalUrls, // ใช้จำนวน URLs ที่ถูกต้อง
         active: activeCount,
         inactive: inactiveCount,
       },
       urls: results,
       device: deviceInfo,
+      network: networkInfo,
       serviceStats: {
         ...this.stats,
         uptime: this.getUptime(),
@@ -672,23 +702,29 @@ class EnhancedBackgroundService {
           type: nativeNetworkInfo.type || 'Unknown',
           carrier: nativeNetworkInfo.carrier || 'Unknown',
           isConnected: nativeNetworkInfo.isConnected || false,
-          isWifiEnabled: nativeNetworkInfo.isWifiEnabled,
-          isMobileEnabled: nativeNetworkInfo.isMobileEnabled,
-        };
-      } else {
-        // Fallback for iOS or if native module is not available
-        return {
-          type: 'Unknown',
-          carrier: 'iOS/Fallback',
-          isConnected: true,
+          isWifiEnabled: nativeNetworkInfo.isWifiEnabled || false,
+          isMobileEnabled: nativeNetworkInfo.isMobileEnabled || false,
+          displayName: nativeNetworkInfo.displayName || 'Unknown',
         };
       }
-    } catch (error) {
-      console.error('Error getting network info in service:', error);
+
       return {
         type: 'Unknown',
+        carrier: 'iOS/Fallback',
+        isConnected: true,
+        isWifiEnabled: false,
+        isMobileEnabled: false,
+        displayName: 'iOS Network',
+      };
+    } catch (error) {
+      console.error('Error getting network info:', error);
+      return {
+        type: 'Error',
         carrier: 'Error',
         isConnected: false,
+        isWifiEnabled: false,
+        isMobileEnabled: false,
+        displayName: 'Error',
       };
     }
   }

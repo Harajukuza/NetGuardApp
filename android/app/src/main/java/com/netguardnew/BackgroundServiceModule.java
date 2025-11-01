@@ -10,7 +10,7 @@ import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.PowerManager;
 import android.util.Log;
-
+import android.telephony.TelephonyManager;
 import androidx.annotation.NonNull;
 
 import com.facebook.react.bridge.Promise;
@@ -241,16 +241,44 @@ public class BackgroundServiceModule extends ReactContextBaseJavaModule {
     public void getNetworkInfo(Promise promise) {
         try {
             WritableMap networkInfo = Arguments.createMap();
-            networkInfo.putBoolean("isConnected", isNetworkAvailable());
-            networkInfo.putString("type", getNetworkType());
-            networkInfo.putString("carrier", getNetworkOperator());
-            networkInfo.putBoolean("isWifiEnabled", isWifiEnabled());
-            networkInfo.putBoolean("isMobileEnabled", isMobileDataEnabled());
+            
+            // Get network type and status
+            String networkType = getNetworkTypeFormatted();
+            String carrier = getNetworkCarrier();
+            boolean isConnected = isNetworkAvailable();
+            
+            // Check WiFi state
+            boolean isWifiEnabled = isWifiEnabled();
+            
+            // Check mobile data state
+            boolean isMobileEnabled = isMobileDataEnabled();
+            
+            // Get display name
+            String displayName = getNetworkDisplayName(networkType, carrier);
+
+            networkInfo.putString("type", networkType);
+            networkInfo.putString("carrier", carrier);
+            networkInfo.putBoolean("isConnected", isConnected);
+            networkInfo.putBoolean("isWifiEnabled", isWifiEnabled);
+            networkInfo.putBoolean("isMobileEnabled", isMobileEnabled);
+            networkInfo.putString("displayName", displayName);
 
             promise.resolve(networkInfo);
         } catch (Exception e) {
             Log.e(TAG, "Error getting network info", e);
             promise.reject("NETWORK_ERROR", "Failed to get network info", e);
+        }
+    }
+
+    private String getNetworkDisplayName(String networkType, String carrier) {
+        if ("wifi".equals(networkType)) {
+            return "WiFi Connection";
+        } else if ("cellular".equals(networkType)) {
+            return carrier + " (Mobile)";
+        } else if ("ethernet".equals(networkType)) {
+            return "Ethernet Connection";
+        } else {
+            return networkType + " Connection";
         }
     }
 
@@ -623,15 +651,17 @@ public class BackgroundServiceModule extends ReactContextBaseJavaModule {
     }
 
     // Network utility methods
-
     private boolean isNetworkAvailable() {
         try {
-            NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
-            return activeNetworkInfo != null && activeNetworkInfo.isConnected();
+            ConnectivityManager cm = (ConnectivityManager) reactContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+                return activeNetwork != null && activeNetwork.isConnected();
+            }
         } catch (Exception e) {
             Log.e(TAG, "Error checking network availability", e);
-            return false;
         }
+        return false;
     }
 
     private String getNetworkType() {
@@ -680,20 +710,28 @@ public class BackgroundServiceModule extends ReactContextBaseJavaModule {
 
     private boolean isWifiEnabled() {
         try {
-            NetworkInfo wifiInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
-            return wifiInfo != null && wifiInfo.isConnected();
+            ConnectivityManager cm = (ConnectivityManager) reactContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                NetworkInfo wifi = cm.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+                return wifi != null && wifi.isAvailable();
+            }
         } catch (Exception e) {
-            return false;
+            Log.e(TAG, "Error checking WiFi state", e);
         }
+        return false;
     }
 
     private boolean isMobileDataEnabled() {
         try {
-            NetworkInfo mobileInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
-            return mobileInfo != null && mobileInfo.isConnected();
+            ConnectivityManager cm = (ConnectivityManager) reactContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                NetworkInfo mobile = cm.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
+                return mobile != null && mobile.isAvailable();
+            }
         } catch (Exception e) {
-            return false;
+            Log.e(TAG, "Error checking mobile data state", e);
         }
+        return false;
     }
 
     // Statistics methods
@@ -758,4 +796,69 @@ public class BackgroundServiceModule extends ReactContextBaseJavaModule {
             this.error = error;
         }
     }
+
+    private void startHeadlessJsTask(Context context, List<URLCheckResult> results, String serviceConfigJson) {
+        try {
+            Intent serviceIntent = new Intent(context, BackgroundCheckService.class);
+            WritableMap resultData = Arguments.createMap();
+            
+            // เพิ่ม source เพื่อระบุว่ามาจาก native service
+            resultData.putString("source", "native");
+            resultData.putString("timestamp", String.valueOf(System.currentTimeMillis()));
+            resultData.putString("serviceConfig", serviceConfigJson);
+            
+            serviceIntent.putExtra("resultData", Arguments.toBundle(resultData));
+            
+            // ...existing code...
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting HeadlessJS task", e);
+        }
+    }
+
+    // เพิ่มใน BackgroundServiceModule.java
+    private String getNetworkTypeFormatted() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) reactContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
+                if (activeNetwork != null) {
+                    switch (activeNetwork.getType()) {
+                        case ConnectivityManager.TYPE_WIFI:
+                            return "wifi";
+                        case ConnectivityManager.TYPE_MOBILE:
+                            return "cellular";
+                        case ConnectivityManager.TYPE_ETHERNET:
+                            return "ethernet";
+                        default:
+                            return "unknown";
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting network type", e);
+        }
+        return "none";
+    }
+
+    private String getNetworkCarrier() {
+        try {
+            TelephonyManager tm = (TelephonyManager) reactContext.getSystemService(Context.TELEPHONY_SERVICE);
+            if (tm != null) {
+                String operatorName = tm.getNetworkOperatorName();
+                if (operatorName != null && !operatorName.isEmpty()) {
+                    return operatorName;
+                }
+                
+                // Fallback to numeric operator
+                String operator = tm.getNetworkOperator();
+                if (operator != null && !operator.isEmpty()) {
+                    return "Carrier " + operator;
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting carrier info", e);
+        }
+        return "Unknown Carrier";
+    }
+    
 }

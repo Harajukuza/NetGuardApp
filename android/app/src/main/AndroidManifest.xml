@@ -4,6 +4,7 @@
     <!-- Basic permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <!-- Background service permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -51,7 +52,8 @@
         <service
             android:name="com.netguardnew.BackgroundCheckService"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Original Background Actions Service -->
         <service
@@ -64,7 +66,10 @@
         <receiver
             android:name="com.netguardnew.BackgroundCheckReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
         </receiver>
 
         <!-- FileProvider for sharing logs/debug info -->

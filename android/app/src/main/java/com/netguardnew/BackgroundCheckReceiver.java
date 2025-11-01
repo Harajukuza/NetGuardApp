@@ -39,9 +39,9 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
     private static final String URL_SYNC_KEY = "last_url_sync";
 
     private static final String[] USER_AGENTS = {
-        "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "NetGuard-Background-Receiver/2.0 (Android; AlarmManager-Triggered)"
+            "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "NetGuard-Background-Receiver/2.0 (Android; AlarmManager-Triggered)"
     };
 
     @Override
@@ -52,9 +52,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
             // Acquire wake lock for this operation
             PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
             PowerManager.WakeLock wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "NetGuard:BackgroundCheckWakeLock"
-            );
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "NetGuard:BackgroundCheckWakeLock");
             wakeLock.acquire(10 * 60 * 1000L); // 10 minutes timeout
 
             // Check if network is available
@@ -221,7 +220,37 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 Log.d(TAG, "Starting background URL checks");
 
                 JSONObject config = new JSONObject(configJson);
-                JSONArray urlsArray = new JSONArray(config.getString("urls"));
+
+                // Robustly extract URLs array: support multiple shapes (JSONArray or stringified JSON or nested config)
+                JSONArray urlsArray = null;
+                try {
+                    if (config.has("urls")) {
+                        Object urlsObj = config.get("urls");
+                        if (urlsObj instanceof JSONArray) {
+                            urlsArray = (JSONArray) urlsObj;
+                        } else {
+                            urlsArray = new JSONArray(config.getString("urls"));
+                        }
+                    } else if (config.has("config") && config.get("config") instanceof JSONObject) {
+                        JSONObject inner = config.getJSONObject("config");
+                        if (inner.has("urls")) {
+                            Object u = inner.get("urls");
+                            if (u instanceof JSONArray) {
+                                urlsArray = (JSONArray) u;
+                            } else {
+                                urlsArray = new JSONArray(inner.getString("urls"));
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to parse urls from config in primary ways, attempting fallbacks", e);
+                }
+
+                if (urlsArray == null) {
+                    Log.w(TAG, "No URLs found in config - aborting background check");
+                    wakeLock.release();
+                    return;
+                }
 
                 List<URLCheckResult> results = new ArrayList<>();
 
@@ -236,7 +265,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                     // Add delay between requests to avoid rate limiting
                     if (i < urlsArray.length() - 1) {
                         try {
-                            Thread.sleep(2000 + (int)(Math.random() * 3000)); // 2-5 second delay
+                            Thread.sleep(2000 + (int) (Math.random() * 3000)); // 2-5 second delay
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             break;
@@ -247,7 +276,32 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 // Update statistics
                 updateStatistics(context, results);
 
-                // Send callback if configured
+                // Ensure callback URL is present in config object for sendBackgroundCallback
+                String callbackUrl = null;
+                try {
+                    if (config.has("callbackUrl")) {
+                        callbackUrl = config.optString("callbackUrl", null);
+                    } else if (config.has("callbackConfig")) {
+                        JSONObject cb = config.optJSONObject("callbackConfig");
+                        if (cb != null) callbackUrl = cb.optString("url", null);
+                    } else if (config.has("config") && config.get("config") instanceof JSONObject) {
+                        JSONObject inner = config.getJSONObject("config");
+                        if (inner.has("callbackUrl")) {
+                            callbackUrl = inner.optString("callbackUrl", null);
+                        } else if (inner.has("callbackConfig")) {
+                            JSONObject cb = inner.optJSONObject("callbackConfig");
+                            if (cb != null) callbackUrl = cb.optString("url", null);
+                        }
+                    }
+
+                    if (callbackUrl != null && (config.isNull("callbackUrl") || !config.has("callbackUrl"))) {
+                        config.put("callbackUrl", callbackUrl);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "Could not normalize callbackUrl in config", e);
+                }
+
+                // Send callback if configured (native will perform the callback)
                 if (config.has("callbackUrl") && !config.isNull("callbackUrl")) {
                     sendBackgroundCallback(context, results, config);
                 }
@@ -255,13 +309,14 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 // Save last check time
                 SharedPreferences preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                 preferences.edit()
-                    .putLong("last_background_check", System.currentTimeMillis())
-                    .apply();
+                        .putLong("last_background_check", System.currentTimeMillis())
+                        .apply();
 
                 Log.d(TAG, "Background check completed successfully. Checked " + results.size() + " URLs");
 
-                // Start HeadlessJsTask to update React Native state
-                startHeadlessJsTask(context, results);
+                // Start HeadlessJsTask to update React Native state.
+                // We set a flag "native_results_only" so JS Headless task will not re-run network checks or resend callbacks.
+                startHeadlessJsTask(context, results, configJson);
 
             } catch (Exception e) {
                 Log.e(TAG, "Error performing background check", e);
@@ -291,9 +346,10 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 connection.setReadTimeout(timeoutMs);
 
                 // Use random user agent
-                String userAgent = USER_AGENTS[(int)(Math.random() * USER_AGENTS.length)];
+                String userAgent = USER_AGENTS[(int) (Math.random() * USER_AGENTS.length)];
                 connection.setRequestProperty("User-Agent", userAgent);
-                connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+                connection.setRequestProperty("Accept",
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
                 connection.setRequestProperty("Accept-Language", "en-US,en;q=0.5");
                 connection.setRequestProperty("Cache-Control", "no-cache");
                 connection.setRequestProperty("Pragma", "no-cache");
@@ -304,10 +360,10 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
                 // Determine if URL is active based on response code
                 boolean isActive = (responseCode >= 200 && responseCode < 300) || // Success
-                                 (responseCode >= 300 && responseCode < 400) || // Redirect
-                                 responseCode == 401 || // Unauthorized (but responding)
-                                 responseCode == 403 || // Forbidden (but responding)
-                                 responseCode == 429;   // Rate limited (but responding)
+                        (responseCode >= 300 && responseCode < 400) || // Redirect
+                        responseCode == 401 || // Unauthorized (but responding)
+                        responseCode == 403 || // Forbidden (but responding)
+                        responseCode == 429; // Rate limited (but responding)
 
                 connection.disconnect();
 
@@ -324,7 +380,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
                 // Wait before retry with exponential backoff
                 try {
-                    Thread.sleep(Math.min(1000 * (long)Math.pow(2, attempt), 10000));
+                    Thread.sleep(Math.min(1000 * (long) Math.pow(2, attempt), 10000));
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     break;
@@ -436,7 +492,7 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
         }
     }
 
-    private void startHeadlessJsTask(Context context, List<URLCheckResult> results) {
+    private void startHeadlessJsTask(Context context, List<URLCheckResult> results, String serviceConfigJson) {
         try {
             Intent serviceIntent = new Intent(context, BackgroundCheckService.class);
 
@@ -449,13 +505,26 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
             long activeCount = results.stream().filter(r -> r.isActive).count();
             long inactiveCount = results.stream().filter(r -> !r.isActive).count();
 
-            resultData.putInt("activeCount", (int)activeCount);
-            resultData.putInt("inactiveCount", (int)inactiveCount);
+            resultData.putInt("activeCount", (int) activeCount);
+            resultData.putInt("inactiveCount", (int) inactiveCount);
 
             serviceIntent.putExtra("resultData", Arguments.toBundle(resultData));
-            context.startService(serviceIntent);
 
-            Log.d(TAG, "HeadlessJsTask started to update React Native state");
+            // Attach the saved service configuration so JS Headless task can use it if needed
+            if (serviceConfigJson != null) {
+                serviceIntent.putExtra("service_config", serviceConfigJson);
+            }
+
+            // IMPORTANT: indicate that these are native results only — JS should not re-run checks/callbacks
+            serviceIntent.putExtra("native_results_only", true);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent);
+            } else {
+                context.startService(serviceIntent);
+            }
+
+            Log.d(TAG, "HeadlessJsTask started to update React Native state (native results only)");
 
         } catch (Exception e) {
             Log.e(TAG, "Error starting HeadlessJsTask", e);
@@ -474,30 +543,29 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 // Use BackgroundServiceModule to reschedule
                 Intent intent = new Intent(context, BackgroundCheckReceiver.class);
                 android.app.PendingIntent pendingIntent = android.app.PendingIntent.getBroadcast(
-                    context,
-                    1001,
-                    intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT |
-                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? android.app.PendingIntent.FLAG_IMMUTABLE : 0)
-                );
+                        context,
+                        1001,
+                        intent,
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT |
+                                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                                        ? android.app.PendingIntent.FLAG_IMMUTABLE
+                                        : 0));
 
-                android.app.AlarmManager alarmManager =
-                    (android.app.AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                android.app.AlarmManager alarmManager = (android.app.AlarmManager) context
+                        .getSystemService(Context.ALARM_SERVICE);
 
                 long nextTriggerTime = System.currentTimeMillis() + (intervalMinutes * 60 * 1000L);
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     alarmManager.setExactAndAllowWhileIdle(
-                        android.app.AlarmManager.RTC_WAKEUP,
-                        nextTriggerTime,
-                        pendingIntent
-                    );
+                            android.app.AlarmManager.RTC_WAKEUP,
+                            nextTriggerTime,
+                            pendingIntent);
                 } else {
                     alarmManager.setExact(
-                        android.app.AlarmManager.RTC_WAKEUP,
-                        nextTriggerTime,
-                        pendingIntent
-                    );
+                            android.app.AlarmManager.RTC_WAKEUP,
+                            nextTriggerTime,
+                            pendingIntent);
                 }
 
                 Log.d(TAG, "Next background check scheduled in " + intervalMinutes + " minutes");
@@ -515,18 +583,18 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
             long activeCount = results.stream().filter(r -> r.isActive).count();
             long inactiveCount = results.stream().filter(r -> !r.isActive).count();
 
-            int totalActive = preferences.getInt("total_active_results", 0) + (int)activeCount;
-            int totalInactive = preferences.getInt("total_inactive_results", 0) + (int)inactiveCount;
+            int totalActive = preferences.getInt("total_active_results", 0) + (int) activeCount;
+            int totalInactive = preferences.getInt("total_inactive_results", 0) + (int) inactiveCount;
 
             preferences.edit()
-                .putInt("total_background_checks", totalChecks)
-                .putInt("total_active_results", totalActive)
-                .putInt("total_inactive_results", totalInactive)
-                .putLong("last_background_check", System.currentTimeMillis())
-                .apply();
+                    .putInt("total_background_checks", totalChecks)
+                    .putInt("total_active_results", totalActive)
+                    .putInt("total_inactive_results", totalInactive)
+                    .putLong("last_background_check", System.currentTimeMillis())
+                    .apply();
 
             Log.d(TAG, "Statistics updated - Total checks: " + totalChecks +
-                      ", Active: " + activeCount + ", Inactive: " + inactiveCount);
+                    ", Active: " + activeCount + ", Inactive: " + inactiveCount);
 
         } catch (Exception e) {
             Log.e(TAG, "Error updating statistics", e);
@@ -540,15 +608,15 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
             if (success) {
                 int successCount = preferences.getInt("successful_callbacks", 0) + 1;
                 preferences.edit()
-                    .putInt("successful_callbacks", successCount)
-                    .putLong("last_successful_callback", System.currentTimeMillis())
-                    .apply();
+                        .putInt("successful_callbacks", successCount)
+                        .putLong("last_successful_callback", System.currentTimeMillis())
+                        .apply();
             } else {
                 int failedCount = preferences.getInt("failed_callbacks", 0) + 1;
                 preferences.edit()
-                    .putInt("failed_callbacks", failedCount)
-                    .putLong("last_failed_callback", System.currentTimeMillis())
-                    .apply();
+                        .putInt("failed_callbacks", failedCount)
+                        .putLong("last_failed_callback", System.currentTimeMillis())
+                        .apply();
             }
         } catch (Exception e) {
             Log.e(TAG, "Error updating callback statistics", e);
@@ -557,8 +625,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
     private boolean isNetworkAvailable(Context context) {
         try {
-            ConnectivityManager connectivityManager =
-                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            ConnectivityManager connectivityManager = (ConnectivityManager) context
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
             NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
             return activeNetworkInfo != null && activeNetworkInfo.isConnected();
         } catch (Exception e) {
@@ -569,11 +637,12 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
     private String getNetworkType(Context context) {
         try {
-            ConnectivityManager connectivityManager =
-                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            ConnectivityManager connectivityManager = (ConnectivityManager) context
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
             NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
 
-            if (activeNetworkInfo == null) return "none";
+            if (activeNetworkInfo == null)
+                return "none";
 
             int type = activeNetworkInfo.getType();
             switch (type) {
@@ -592,11 +661,11 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
         }
     }
 
-    //เช็คเครือข่ายซิม
+    // เช็คเครือข่ายซิม
     private String getNetworkCarrier(Context context) {
         try {
-            ConnectivityManager connectivityManager =
-                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            ConnectivityManager connectivityManager = (ConnectivityManager) context
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
             NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
 
             if (activeNetworkInfo == null) {
@@ -610,7 +679,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
             // ถ้าเป็น Mobile/Cellular
             if (activeNetworkInfo.getType() == ConnectivityManager.TYPE_MOBILE) {
-                TelephonyManager telephonyManager = (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+                TelephonyManager telephonyManager = (TelephonyManager) context
+                        .getSystemService(Context.TELEPHONY_SERVICE);
                 if (telephonyManager != null) {
                     String operatorName = telephonyManager.getNetworkOperatorName();
                     if (operatorName != null && !operatorName.isEmpty()) {
@@ -638,11 +708,12 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
     private String getNetworkTypeFormatted(Context context) {
         try {
-            ConnectivityManager connectivityManager =
-                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            ConnectivityManager connectivityManager = (ConnectivityManager) context
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
             NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
 
-            if (activeNetworkInfo == null) return "none";
+            if (activeNetworkInfo == null)
+                return "none";
 
             int type = activeNetworkInfo.getType();
             switch (type) {
