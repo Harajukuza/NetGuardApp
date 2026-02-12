@@ -13,15 +13,21 @@
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-community/cli-doctor": "^20.0.2",
     "@react-native-community/netinfo": "^11.4.1",
+    "@react-native-firebase/app": "^18.8.0",
+    "@react-native-firebase/messaging": "^18.8.0",
     "@react-native/new-app-screen": "0.81.4",
     "@types/react-native-background-timer": "^2.0.2",
     "lodash": "^4.17.21",
     "react": "19.1.0",
     "react-native": "0.81.4",
     "react-native-background-actions": "^4.0.1",
+    "react-native-background-fetch": "^4.2.3",
     "react-native-background-timer": "^2.4.1",
     "react-native-device-info": "^14.1.1",
-    "react-native-safe-area-context": "^5.5.2"
+    "react-native-notifications": "^5.1.0",
+    "react-native-push-notification": "^8.1.1",
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-workmanager": "^2.0.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

@@ -105,8 +105,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                     boolean syncSuccess = syncUrlsFromApi(context, apiEndpoint);
                     if (syncSuccess) {
                         preferences.edit()
-                            .putLong(URL_SYNC_KEY, currentTime)
-                            .apply();
+                                .putLong(URL_SYNC_KEY, currentTime)
+                                .apply();
                         Log.d(TAG, "Background URL sync completed successfully");
                     }
                 }
@@ -166,34 +166,68 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
                 // Check if URLs have changed
                 SharedPreferences preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                String currentUrlsJson = preferences.getString("service_config", "{}");
-                JSONObject currentConfig = new JSONObject(currentUrlsJson);
-                JSONArray currentUrls = currentConfig.optJSONArray("urls");
+                String currentConfigJson = preferences.getString("service_config", "{}");
+                JSONObject currentConfig = new JSONObject(currentConfigJson);
 
-                int currentCount = currentUrls != null ? currentUrls.length() : 0;
-                int newCount = newUrls.length();
+                // Get currently selected callback name to filter URLs
+                String selectedCallback = currentConfig.optString("callbackName", "");
+                if (selectedCallback.isEmpty() && currentConfig.has("callbackConfig")) {
+                    JSONObject cb = currentConfig.optJSONObject("callbackConfig");
+                    if (cb != null)
+                        selectedCallback = cb.optString("name", "");
+                }
 
-                if (newCount != currentCount) {
-                    Log.d(TAG, "URL count changed: " + currentCount + " -> " + newCount);
+                // Filter new URLs by callback if needed and deduplicate
+                JSONArray filteredNewUrls = new JSONArray();
+                java.util.HashSet<String> seenUrls = new java.util.HashSet<>();
+                for (int i = 0; i < newUrls.length(); i++) {
+                    JSONObject item = newUrls.getJSONObject(i);
+                    String urlString = item.optString("url", "");
+                    String itemCallback = item.optString("callback_name", "");
 
-                    // Update stored configuration with new URLs
-                    JSONArray urlArray = new JSONArray();
-                    for (int i = 0; i < newUrls.length(); i++) {
-                        JSONObject item = newUrls.getJSONObject(i);
-                        String urlString = item.optString("url", "");
-                        if (!urlString.isEmpty()) {
-                            urlArray.put(urlString);
+                    if (!urlString.isEmpty()) {
+                        if (selectedCallback.isEmpty() || selectedCallback.equals(itemCallback)) {
+                            if (!seenUrls.contains(urlString)) {
+                                seenUrls.add(urlString);
+                                filteredNewUrls.put(urlString);
+                            }
                         }
                     }
+                }
 
-                    currentConfig.put("urls", urlArray);
+                // Get current URLs for comparison
+                JSONArray currentUrls = currentConfig.optJSONArray("urls");
+                if (currentUrls == null && currentConfig.has("urls")) {
+                    try {
+                        currentUrls = new JSONArray(currentConfig.getString("urls"));
+                    } catch (Exception e) {
+                    }
+                }
+
+                boolean hasChanged = false;
+                if (currentUrls == null || filteredNewUrls.length() != currentUrls.length()) {
+                    hasChanged = true;
+                } else {
+                    // Compare actual contents
+                    for (int i = 0; i < filteredNewUrls.length(); i++) {
+                        if (!filteredNewUrls.getString(i).equals(currentUrls.getString(i))) {
+                            hasChanged = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (hasChanged) {
+                    Log.d(TAG, "URLs have changed. Updating configuration.");
+
+                    currentConfig.put("urls", filteredNewUrls);
                     preferences.edit()
-                        .putString("service_config", currentConfig.toString())
-                        .putLong("last_url_update", System.currentTimeMillis())
-                        .putInt("new_urls_count", Math.max(0, newCount - currentCount))
-                        .apply();
+                            .putString("service_config", currentConfig.toString())
+                            .putLong("last_url_update", System.currentTimeMillis())
+                            .putInt("new_urls_count", filteredNewUrls.length())
+                            .apply();
 
-                    Log.d(TAG, "Service configuration updated with " + urlArray.length() + " URLs");
+                    Log.d(TAG, "Service configuration updated with " + filteredNewUrls.length() + " URLs");
                     return true;
                 }
 
@@ -221,7 +255,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
                 JSONObject config = new JSONObject(configJson);
 
-                // Robustly extract URLs array: support multiple shapes (JSONArray or stringified JSON or nested config)
+                // Robustly extract URLs array: support multiple shapes (JSONArray or
+                // stringified JSON or nested config)
                 JSONArray urlsArray = null;
                 try {
                     if (config.has("urls")) {
@@ -283,14 +318,16 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                         callbackUrl = config.optString("callbackUrl", null);
                     } else if (config.has("callbackConfig")) {
                         JSONObject cb = config.optJSONObject("callbackConfig");
-                        if (cb != null) callbackUrl = cb.optString("url", null);
+                        if (cb != null)
+                            callbackUrl = cb.optString("url", null);
                     } else if (config.has("config") && config.get("config") instanceof JSONObject) {
                         JSONObject inner = config.getJSONObject("config");
                         if (inner.has("callbackUrl")) {
                             callbackUrl = inner.optString("callbackUrl", null);
                         } else if (inner.has("callbackConfig")) {
                             JSONObject cb = inner.optJSONObject("callbackConfig");
-                            if (cb != null) callbackUrl = cb.optString("url", null);
+                            if (cb != null)
+                                callbackUrl = cb.optString("url", null);
                         }
                     }
 
@@ -315,7 +352,8 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
                 Log.d(TAG, "Background check completed successfully. Checked " + results.size() + " URLs");
 
                 // Start HeadlessJsTask to update React Native state.
-                // We set a flag "native_results_only" so JS Headless task will not re-run network checks or resend callbacks.
+                // We set a flag "native_results_only" so JS Headless task will not re-run
+                // network checks or resend callbacks.
                 startHeadlessJsTask(context, results, configJson);
 
             } catch (Exception e) {
@@ -510,12 +548,14 @@ public class BackgroundCheckReceiver extends BroadcastReceiver {
 
             serviceIntent.putExtra("resultData", Arguments.toBundle(resultData));
 
-            // Attach the saved service configuration so JS Headless task can use it if needed
+            // Attach the saved service configuration so JS Headless task can use it if
+            // needed
             if (serviceConfigJson != null) {
                 serviceIntent.putExtra("service_config", serviceConfigJson);
             }
 
-            // IMPORTANT: indicate that these are native results only — JS should not re-run checks/callbacks
+            // IMPORTANT: indicate that these are native results only — JS should not re-run
+            // checks/callbacks
             serviceIntent.putExtra("native_results_only", true);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

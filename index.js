@@ -43,15 +43,21 @@ const loadConfiguration = async taskData => {
       }
     }
 
-    // Priority 2: Load from AsyncStorage
+    // Priority 2: Load from AsyncStorage with service config check
     console.log('[HeadlessTask] Loading configuration from AsyncStorage');
-    const [savedUrls, savedCallback, savedApiEndpoint, selectedCallback] =
-      await Promise.all([
-        AsyncStorage.getItem('@Enhanced:urls'),
-        AsyncStorage.getItem('@Enhanced:callback'),
-        AsyncStorage.getItem('@Enhanced:apiEndpoint'),
-        AsyncStorage.getItem('@Enhanced:selectedCallback'),
-      ]);
+    const [
+      savedUrls,
+      savedCallback,
+      savedApiEndpoint,
+      selectedCallback,
+      serviceConfig,
+    ] = await Promise.all([
+      AsyncStorage.getItem('@Enhanced:urls'),
+      AsyncStorage.getItem('@Enhanced:callback'),
+      AsyncStorage.getItem('@Enhanced:apiEndpoint'),
+      AsyncStorage.getItem('@Enhanced:selectedCallback'),
+      AsyncStorage.getItem('@Enhanced:serviceConfig'),
+    ]);
 
     // Load URLs from storage
     if (savedUrls) {
@@ -73,6 +79,29 @@ const loadConfiguration = async taskData => {
         config.callbackConfig = JSON.parse(savedCallback);
       } catch (e) {
         console.error('[HeadlessTask] Error parsing saved callback:', e);
+      }
+    }
+
+    // Check for updated service configuration
+    if (serviceConfig) {
+      try {
+        const parsed = JSON.parse(serviceConfig);
+        if (
+          parsed.config &&
+          parsed.config.urls &&
+          parsed.config.urls.length > 0
+        ) {
+          config.urls = parsed.config.urls.map(url => ({ url }));
+          if (parsed.config.callbackConfig) {
+            config.callbackConfig = parsed.config.callbackConfig;
+          }
+          console.log(
+            '[HeadlessTask] Loaded URLs from service config:',
+            config.urls.length,
+          );
+        }
+      } catch (e) {
+        console.log('[HeadlessTask] Error parsing service config:', e);
       }
     }
 
@@ -399,8 +428,31 @@ const BackgroundURLCheckTask = async taskData => {
       }
     }
 
-    // Load configuration with enhanced error handling
+    // Always reload configuration from storage to get latest URLs
+    console.log('[HeadlessTask] Reloading configuration from storage');
     const config = await loadConfiguration(taskData);
+
+    // Check if service configuration has been updated
+    try {
+      const serviceConfig = await AsyncStorage.getItem(
+        '@Enhanced:serviceConfig',
+      );
+      if (serviceConfig) {
+        const parsed = JSON.parse(serviceConfig);
+        if (
+          parsed.config &&
+          parsed.config.urls &&
+          parsed.config.callbackConfig
+        ) {
+          console.log('[HeadlessTask] Found updated service configuration');
+          config.urls = parsed.config.urls.map(url => ({ url }));
+          config.callbackConfig = parsed.config.callbackConfig;
+          config.hasValidConfig = true;
+        }
+      }
+    } catch (e) {
+      console.log('[HeadlessTask] No updated service configuration found');
+    }
 
     if (!config.hasValidConfig) {
       // Try one more time to load from emergency backup
@@ -458,6 +510,33 @@ const BackgroundURLCheckTask = async taskData => {
       );
     } catch (e) {
       console.warn('[HeadlessTask] Failed to create emergency backup:', e);
+    }
+
+    // Double-check for latest URLs from storage before starting checks
+    try {
+      const latestUrls = await AsyncStorage.getItem('@Enhanced:urls');
+      const latestCallback = await AsyncStorage.getItem('@Enhanced:callback');
+
+      if (latestUrls) {
+        const parsedUrls = JSON.parse(latestUrls);
+        if (Array.isArray(parsedUrls) && parsedUrls.length > 0) {
+          config.urls = parsedUrls;
+          console.log(
+            '[HeadlessTask] Using latest URLs from storage:',
+            parsedUrls.length,
+          );
+        }
+      }
+
+      if (latestCallback) {
+        const parsedCallback = JSON.parse(latestCallback);
+        if (parsedCallback && parsedCallback.url) {
+          config.callbackConfig = parsedCallback;
+          console.log('[HeadlessTask] Using latest callback from storage');
+        }
+      }
+    } catch (e) {
+      console.log('[HeadlessTask] Using existing configuration');
     }
 
     console.log(

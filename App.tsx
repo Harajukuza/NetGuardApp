@@ -59,6 +59,7 @@ const STORAGE_KEYS = {
   URLS: '@Enhanced:urls',
   CALLBACK: '@Enhanced:callback',
   INTERVAL: '@Enhanced:checkInterval',
+  SYNC_INTERVAL: '@Enhanced:syncInterval',
   LAST_CALLBACK: '@Enhanced:lastCallback',
   LAST_CHECK_TIME: '@Enhanced:lastCheckTime',
   AUTO_CHECK_ENABLED: '@Enhanced:autoCheckEnabled',
@@ -157,6 +158,25 @@ function AppContent() {
   const [showScrollButton, setShowScrollButton] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
+  // Helper functions (moved here to be available throughout component)
+  const normalizeUrl = (url: string): string => {
+    let normalized = url.trim();
+    if (!normalized.match(/^https?:\/\//i)) {
+      normalized = 'https://' + normalized;
+    }
+    return normalized.replace(/\/+$/, '');
+  };
+
+  const isValidUrl = (url: string): boolean => {
+    try {
+      const _unusedUrl = new URL(url);
+      _unusedUrl.toString();
+      return url.startsWith('http://') || url.startsWith('https://');
+    } catch {
+      return false;
+    }
+  };
+
   // Define callbacks first
   const refreshNetworkInfo = useCallback(async () => {
     try {
@@ -222,6 +242,7 @@ function AppContent() {
     url: '',
   });
   const [checkInterval, setCheckInterval] = useState('60');
+  const [syncInterval, setSyncInterval] = useState('60'); // Default sync interval in minutes
   const [isLoading, setIsLoading] = useState(false);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo>({
     type: 'Unknown',
@@ -308,27 +329,36 @@ function AppContent() {
               cbName,
             );
             setIsLoadingAPI(false);
-            setApiError(`No URLs found for callback: ${cbName}`);
-            return;
+            if (!silentMode) {
+              setApiError(`No URLs found for callback: ${cbName}`);
+            }
+            return false;
           }
 
           const callbackUrl = filteredData[0].callback_url;
 
           // Update callback config if URL changed
-          setCallbackConfig(prev => {
-            if (!prev || prev.url !== callbackUrl || prev.name !== cbName) {
-              return { name: cbName, url: callbackUrl };
-            }
-            return prev;
-          });
+          const newCallbackConfig = { name: cbName, url: callbackUrl };
+          setCallbackConfig(newCallbackConfig);
 
-          // Create new URL items
-          const newUrls: URLItem[] = filteredData.map(item => ({
-            id: `${item.id}_${Date.now()}_${Math.random()}`,
-            url: item.url,
-            status: 'checking' as const,
-            checkHistory: [],
-          }));
+          // Create new URL items with stable IDs and deduplicate
+          const seenUrls = new Set<string>();
+          const newUrls: URLItem[] = [];
+
+          filteredData.forEach(item => {
+            const normalized = normalizeUrl(item.url);
+            if (!seenUrls.has(normalized)) {
+              seenUrls.add(normalized);
+              newUrls.push({
+                id: item.id
+                  ? String(item.id)
+                  : `url_${normalized.replace(/[^a-zA-Z0-9]/g, '_')}`,
+                url: normalized,
+                status: 'checking' as const,
+                checkHistory: [],
+              });
+            }
+          });
 
           // Replace all URLs with new ones from API
           setUrls(newUrls);
@@ -338,17 +368,100 @@ function AppContent() {
           console.log(
             `[syncUrlsFromApi] Synced ${newUrls.length} URLs for callback: ${cbName}`,
           );
+
+          // Update running service configuration without stopping it
+          if (isEnhancedServiceRunning) {
+            console.log(
+              '[syncUrlsFromApi] Updating running service with new URLs',
+            );
+
+            const updatedConfig: BackgroundServiceConfig = {
+              urls: newUrls.map(url => url.url),
+              callbackConfig: newCallbackConfig,
+              intervalMinutes: parseInt(checkInterval, 10),
+              retryAttempts: 3,
+              timeoutMs: REQUEST_TIMEOUT,
+            };
+
+            // Save updated configuration for background tasks
+            await AsyncStorage.setItem(
+              '@Enhanced:serviceConfig',
+              JSON.stringify({
+                isRunning: true,
+                config: updatedConfig,
+                startTime: Date.now(),
+                lastActivityTime: Date.now(),
+              }),
+            );
+
+            // Update last used URLs for background tasks
+            await AsyncStorage.setItem(
+              '@Enhanced:lastUsedUrls',
+              JSON.stringify(newUrls),
+            );
+
+            // Update URLs and callback for background tasks
+            await AsyncStorage.setItem(
+              '@Enhanced:urls',
+              JSON.stringify(newUrls),
+            );
+            await AsyncStorage.setItem(
+              '@Enhanced:callback',
+              JSON.stringify(newCallbackConfig),
+            );
+
+            console.log(
+              `[syncUrlsFromApi] Service configuration updated without restart - ${newUrls.length} URLs`,
+            );
+
+            // DO NOT stop or restart the service - just update configuration
+            // The background service will pick up the new configuration automatically
+          }
+
           setIsLoadingAPI(false);
           setApiError(null);
+          return true;
         }
       } catch (error: any) {
         console.error('Error syncing URLs from API:', error);
         setIsLoadingAPI(false);
-        setApiError(error?.message || 'Failed to sync from API');
+        if (!silentMode) {
+          setApiError(error?.message || 'Failed to sync from API');
+        }
+        return false;
       }
     },
-    [apiEndpoint, selectedCallbackName],
+    [
+      apiEndpoint,
+      selectedCallbackName,
+      isEnhancedServiceRunning,
+      checkInterval,
+    ],
   );
+
+  // Helper function for network type
+  const getCarrierName = (networkType: string) => {
+    switch (networkType) {
+      case 'wifi':
+        return 'WiFi Connection';
+      case 'mobile':
+        return 'Mobile Data';
+      case 'ethernet':
+        return 'Ethernet';
+      default:
+        return 'Unknown Connection';
+    }
+  };
+
+  // Network change handler
+  const handleNetworkChange = useCallback((netInfo: any) => {
+    console.log('Network state changed:', netInfo);
+    setNetworkInfo({
+      type: netInfo.type || 'Unknown',
+      carrier: getCarrierName(netInfo.type),
+      isConnected: netInfo.isConnected || false,
+    });
+  }, []);
 
   // Listen to background/headless events emitted from index.js for real-time UI updates
   useEffect(() => {
@@ -402,6 +515,7 @@ function AppContent() {
       sub3.remove();
       sub4.remove();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Native service states
@@ -481,25 +595,51 @@ function AppContent() {
     return () => {
       backHandler.remove();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEnhancedServiceRunning]);
 
-  // Periodic sync handler
+  // Periodic sync handler with continuous service operation
   useEffect(() => {
     if (!isEnhancedServiceRunning || !autoSyncEnabled || !selectedCallbackName)
       return;
 
-    const syncInterval = setInterval(() => {
-      if (selectedCallbackName) {
-        syncUrlsFromApi(selectedCallbackName, true); // silent mode for background sync
-      }
-    }, parseInt(checkInterval, 10) * 60 * 1000); // Sync at the same interval as URL checks
+    const intervalMinutes = parseInt(syncInterval, 10) || 60;
+    console.log(
+      '[Periodic Sync] Setting up auto-sync every ' +
+        intervalMinutes +
+        ' minutes',
+    );
 
-    return () => clearInterval(syncInterval);
+    const syncTimer = setInterval(async () => {
+      if (selectedCallbackName) {
+        console.log(
+          '[Periodic Sync] Running automatic URL sync (every ' +
+            intervalMinutes +
+            ' minutes)',
+        );
+        const syncResult = await syncUrlsFromApi(selectedCallbackName, true);
+
+        if (syncResult) {
+          console.log(
+            '[Periodic Sync] URLs synced successfully, service continues running',
+          );
+        } else {
+          console.log(
+            '[Periodic Sync] Sync failed or no changes, service continues',
+          );
+        }
+      }
+    }, intervalMinutes * 60 * 1000); // Convert minutes to milliseconds
+
+    return () => {
+      console.log('[Periodic Sync] Clearing sync interval');
+      clearInterval(syncTimer);
+    };
   }, [
     isEnhancedServiceRunning,
     autoSyncEnabled,
     selectedCallbackName,
-    checkInterval,
+    syncInterval,
     syncUrlsFromApi,
   ]);
 
@@ -521,7 +661,14 @@ function AppContent() {
 
           // Sync URLs if auto-sync is enabled
           if (autoSyncEnabled && selectedCallbackName) {
-            syncUrlsFromApi(selectedCallbackName, true); // silent mode for background sync
+            // Don't await to avoid blocking app state changes
+            syncUrlsFromApi(selectedCallbackName, true).then(result => {
+              if (result) {
+                console.log(
+                  '[App State] Background sync completed successfully',
+                );
+              }
+            });
           }
         }
 
@@ -540,48 +687,7 @@ function AppContent() {
     refreshNetworkInfo,
   ]);
 
-  // Network change handler
-  const handleNetworkChange = useCallback((netInfo: any) => {
-    console.log('Network state changed:', netInfo);
-    setNetworkInfo({
-      type: netInfo.type || 'Unknown',
-      carrier: getCarrierName(netInfo.type),
-      isConnected: netInfo.isConnected || false,
-    });
-  }, []);
-
   // Helper functions
-  const getCarrierName = (networkType: string) => {
-    switch (networkType) {
-      case 'wifi':
-        return 'WiFi Connection';
-      case 'mobile':
-        return 'Mobile Data';
-      case 'ethernet':
-        return 'Ethernet';
-      default:
-        return 'Unknown Connection';
-    }
-  };
-
-  const normalizeUrl = (url: string): string => {
-    let normalized = url.trim();
-    if (!normalized.match(/^https?:\/\//i)) {
-      normalized = 'https://' + normalized;
-    }
-    return normalized.replace(/\/+$/, '');
-  };
-
-  const isValidUrl = (url: string): boolean => {
-    try {
-      const _unusedUrl = new URL(url);
-      _unusedUrl.toString();
-      return url.startsWith('http://') || url.startsWith('https://');
-    } catch {
-      return false;
-    }
-  };
-
   const formatTimeAgo = (date: Date): string => {
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
@@ -648,12 +754,77 @@ function AppContent() {
 
   // Data management functions
 
+  // API integration function (moved here to be used in loadSavedData)
+  const loadFromAPI = useCallback(
+    async (silentMode = false) => {
+      if (!apiEndpoint) {
+        // non-blocking error and focus UI (avoid Alert which may block headless flows)
+        if (!silentMode) {
+          setApiError('Please enter API endpoint URL');
+        }
+        return false;
+      }
+
+      // normalize and validate before trying
+      const endpoint = normalizeUrl(apiEndpoint);
+      if (!isValidUrl(endpoint)) {
+        if (!silentMode) {
+          setApiError('Invalid API endpoint URL');
+        }
+        return false;
+      }
+
+      setIsLoadingAPI(true);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data: APIResponse = await response.json();
+
+        if (data.status === 'success' && data.data) {
+          setApiData(data.data);
+          const uniqueCallbackNames = [
+            ...new Set(data.data.map(item => item.callback_name)),
+          ];
+          setApiCallbackNames(uniqueCallbackNames);
+          // Provide inline success feedback
+          setApiError(null);
+          if (!silentMode) {
+            Alert.alert(
+              'Success',
+              `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
+            );
+          }
+          return true;
+        } else {
+          throw new Error('Invalid API response format');
+        }
+      } catch (error: any) {
+        if (!silentMode) {
+          setApiError(error?.message || 'Failed to load from API');
+        }
+        console.error('Failed to load from API:', error);
+        return false;
+      } finally {
+        setIsLoadingAPI(false);
+      }
+    },
+    [apiEndpoint],
+  );
+
   const loadSavedData = useCallback(async () => {
     try {
       const [
         savedUrls,
         savedCallback,
         savedInterval,
+        savedSyncInterval,
         savedLastCallback,
         savedLastCheck,
         savedApiEndpoint,
@@ -663,6 +834,7 @@ function AppContent() {
         AsyncStorage.getItem(STORAGE_KEYS.URLS),
         AsyncStorage.getItem(STORAGE_KEYS.CALLBACK),
         AsyncStorage.getItem(STORAGE_KEYS.INTERVAL),
+        AsyncStorage.getItem(STORAGE_KEYS.SYNC_INTERVAL),
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CALLBACK),
         AsyncStorage.getItem(STORAGE_KEYS.LAST_CHECK_TIME),
         AsyncStorage.getItem(STORAGE_KEYS.API_ENDPOINT),
@@ -686,6 +858,7 @@ function AppContent() {
 
       if (savedCallback) setCallbackConfig(JSON.parse(savedCallback));
       if (savedInterval) setCheckInterval(savedInterval);
+      if (savedSyncInterval) setSyncInterval(savedSyncInterval);
       if (savedApiEndpoint) setApiEndpoint(savedApiEndpoint);
       if (savedSelectedCallback) setSelectedCallbackName(savedSelectedCallback);
       if (savedAutoSync) setAutoSyncEnabled(savedAutoSync === 'true');
@@ -716,7 +889,7 @@ function AppContent() {
     } catch (error) {
       console.error('Error loading saved data:', error);
     }
-  }, []);
+  }, [loadFromAPI]);
 
   const saveSavedData = useCallback(async () => {
     try {
@@ -727,6 +900,7 @@ function AppContent() {
           JSON.stringify(callbackConfig),
         ),
         AsyncStorage.setItem(STORAGE_KEYS.INTERVAL, checkInterval),
+        AsyncStorage.setItem(STORAGE_KEYS.SYNC_INTERVAL, syncInterval),
         AsyncStorage.setItem(STORAGE_KEYS.API_ENDPOINT, apiEndpoint),
         AsyncStorage.setItem(
           STORAGE_KEYS.SELECTED_CALLBACK,
@@ -751,6 +925,7 @@ function AppContent() {
     urls,
     callbackConfig,
     checkInterval,
+    syncInterval,
     apiEndpoint,
     lastCheckTime,
     autoSyncEnabled,
@@ -821,13 +996,15 @@ function AppContent() {
     try {
       // If auto-sync is enabled, sync before starting service (silent mode)
       if (autoSyncEnabled && selectedCallbackName) {
-        try {
-          await syncUrlsFromApi(selectedCallbackName, true);
-        } catch (error) {
-          console.log(
-            'Non-critical: Failed to sync URLs before starting service:',
-            error,
-          );
+        console.log(
+          '[Service Start] Syncing URLs from API before starting service',
+        );
+        const syncSuccess = await syncUrlsFromApi(selectedCallbackName, true);
+
+        if (syncSuccess) {
+          console.log('[Service Start] URLs synced successfully');
+        } else {
+          console.log('[Service Start] Sync failed, using existing URLs');
         }
       }
 
@@ -891,16 +1068,29 @@ function AppContent() {
         setIsEnhancedServiceRunning(true);
         await loadServiceStats();
 
-        Alert.alert(
-          'Enhanced Background Service Started',
-          `URLs will be monitored every ${checkInterval} minutes with enhanced stability.\n\n` +
-            '🔄 Service is now active\n' +
-            '📱 You can now close or minimize the app\n' +
-            '🔔 Persistent notification will be visible',
-          [{ text: 'OK' }],
-        );
+        if (!autoSyncEnabled) {
+          // Only show alert if not in auto-sync mode
+          Alert.alert(
+            'Enhanced Background Service Started',
+            `URLs will be monitored every ${checkInterval} minutes with enhanced stability.\n\n` +
+              '🔄 Service is now active\n' +
+              '📱 You can now close or minimize the app\n' +
+              '🔔 Persistent notification will be visible',
+            [{ text: 'OK' }],
+          );
+        } else {
+          console.log(
+            '[Service Start] Service started in auto-sync mode - no alert shown',
+          );
+        }
       } else {
-        Alert.alert('Error', 'Failed to start enhanced background service');
+        if (!autoSyncEnabled) {
+          Alert.alert('Error', 'Failed to start enhanced background service');
+        } else {
+          console.error(
+            '[Service Start] Failed to start service in auto-sync mode',
+          );
+        }
       }
     } catch (error: any) {
       console.error('Failed to start enhanced background service:', error);
@@ -1090,67 +1280,7 @@ function AppContent() {
     }
   };
 
-  // API integration functions
-  const loadFromAPI = async (silentMode = false) => {
-    if (!apiEndpoint) {
-      // non-blocking error and focus UI (avoid Alert which may block headless flows)
-      if (!silentMode) {
-        setApiError('Please enter API endpoint URL');
-      }
-      return false;
-    }
-
-    // normalize and validate before trying
-    const endpoint = normalizeUrl(apiEndpoint);
-    if (!isValidUrl(endpoint)) {
-      if (!silentMode) {
-        setApiError('Invalid API endpoint URL');
-      }
-      return false;
-    }
-
-    setIsLoadingAPI(true);
-    try {
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data: APIResponse = await response.json();
-
-      if (data.status === 'success' && data.data) {
-        setApiData(data.data);
-        const uniqueCallbackNames = [
-          ...new Set(data.data.map(item => item.callback_name)),
-        ];
-        setApiCallbackNames(uniqueCallbackNames);
-        // Provide inline success feedback
-        setApiError(null);
-        if (!silentMode) {
-          Alert.alert(
-            'Success',
-            `Loaded ${data.data.length} URLs from ${uniqueCallbackNames.length} callback configurations`,
-          );
-        }
-        return true;
-      } else {
-        throw new Error('Invalid API response format');
-      }
-    } catch (error: any) {
-      if (!silentMode) {
-        setApiError(error?.message || 'Failed to load from API');
-      }
-      console.error('Failed to load from API:', error);
-      return false;
-    } finally {
-      setIsLoadingAPI(false);
-    }
-  };
-
+  // Load URLs for specific callback
   const loadURLsForCallback = (callbackName: string) => {
     const filteredData = apiData.filter(
       item => item.callback_name === callbackName,
@@ -1164,12 +1294,23 @@ function AppContent() {
     const callbackUrl = filteredData[0].callback_url;
     setCallbackConfig({ name: callbackName, url: callbackUrl });
 
-    const newUrls: URLItem[] = filteredData.map(item => ({
-      id: `${item.id}_${Date.now()}_${Math.random()}`,
-      url: item.url,
-      status: 'checking' as const,
-      checkHistory: [],
-    }));
+    const seenUrls = new Set<string>(urls.map(u => normalizeUrl(u.url)));
+    const newUrls: URLItem[] = [];
+
+    filteredData.forEach(item => {
+      const normalized = normalizeUrl(item.url);
+      if (!seenUrls.has(normalized)) {
+        seenUrls.add(normalized);
+        newUrls.push({
+          id: item.id
+            ? String(item.id)
+            : `url_${normalized.replace(/[^a-zA-Z0-9]/g, '_')}`,
+          url: normalized,
+          status: 'checking' as const,
+          checkHistory: [],
+        });
+      }
+    });
 
     setUrls(prevUrls => [...prevUrls, ...newUrls]);
     setSelectedCallbackName(callbackName);
@@ -1229,6 +1370,36 @@ function AppContent() {
           },
         ],
       );
+    }
+  };
+
+  const saveSyncInterval = async () => {
+    const interval = parseInt(syncInterval, 10);
+    if (isNaN(interval) || interval < 1) {
+      Alert.alert(
+        'Error',
+        'Please enter a valid sync interval (minimum 1 minute)',
+      );
+      return;
+    }
+
+    try {
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.SYNC_INTERVAL,
+        interval.toString(),
+      );
+      Alert.alert('Success', `Sync interval set to ${interval} minutes`);
+
+      // If auto-sync is enabled and service is running, inform about the change
+      if (autoSyncEnabled && isEnhancedServiceRunning) {
+        Alert.alert(
+          'Sync Interval Updated',
+          `URLs will now sync from API every ${interval} minutes while the service is running.`,
+        );
+      }
+    } catch (error) {
+      console.error('Failed to save sync interval:', error);
+      Alert.alert('Error', 'Failed to save sync interval');
     }
   };
 
@@ -1300,7 +1471,8 @@ function AppContent() {
               <>
                 <Text style={[styles.serviceDescription, textStyle]}>
                   Monitoring {urls.length} URLs every {checkInterval} minutes
-                  with enhanced stability
+                  {autoSyncEnabled &&
+                    ` • Syncing URLs every ${syncInterval || '60'} minutes`}
                 </Text>
                 <Text style={[styles.serviceUptime, textStyle]}>
                   Uptime: {formatUptime(serviceStats.uptime)}
@@ -1483,7 +1655,7 @@ function AppContent() {
             {selectedCallbackName && (
               <View style={[styles.toggleRow, styles.marginTop]}>
                 <Text style={[styles.toggleLabel, textStyle]}>
-                  Auto-sync URLs from API
+                  Auto-sync URLs from API (every {syncInterval || '60'} minutes)
                 </Text>
                 <Switch
                   value={autoSyncEnabled}
@@ -1679,22 +1851,55 @@ function AppContent() {
           {/* Check Interval Settings */}
           <View style={cardStyle}>
             <Text style={[styles.sectionTitle, textStyle]}>
-              Check Interval Settings
+              Check & Sync Interval Settings
             </Text>
 
             <View style={styles.inputRow}>
               <TextInput
                 style={[inputStyle, styles.intervalInput]}
-                placeholder="Interval (minutes)"
+                placeholder="Check interval (minutes)"
                 placeholderTextColor={isDarkMode ? '#999' : '#666'}
                 value={checkInterval}
                 onChangeText={setCheckInterval}
                 keyboardType="numeric"
               />
               <TouchableOpacity style={styles.button} onPress={saveInterval}>
-                <Text style={styles.buttonText}>Set Interval</Text>
+                <Text style={styles.buttonText}>Set Check Interval</Text>
               </TouchableOpacity>
             </View>
+
+            {/* เพิ่มส่วน Sync Interval ที่นี่ */}
+            {autoSyncEnabled && (
+              <>
+                <View style={[styles.inputRow, styles.marginTop]}>
+                  <TextInput
+                    style={[inputStyle, styles.intervalInput]}
+                    placeholder="Sync interval (minutes)"
+                    placeholderTextColor={isDarkMode ? '#999' : '#666'}
+                    value={syncInterval}
+                    onChangeText={setSyncInterval}
+                    keyboardType="numeric"
+                  />
+                  <TouchableOpacity
+                    style={styles.button}
+                    onPress={saveSyncInterval}
+                  >
+                    <Text style={styles.buttonText}>Set Sync Interval</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.syncIntervalText, textStyle]}>
+                  📍 Current: Check every {checkInterval} min • Sync every{' '}
+                  {syncInterval} min
+                </Text>
+              </>
+            )}
+
+            {!autoSyncEnabled && (
+              <Text style={[styles.syncIntervalText, textStyle]}>
+                📍 URL Sync: Disabled (Enable auto-sync to configure)
+              </Text>
+            )}
 
             {/* Enhanced Service Tips */}
             <View style={styles.androidTips}>
@@ -1702,8 +1907,13 @@ function AppContent() {
                 💡 Enhanced Service Features:
               </Text>
               <Text style={[styles.androidTipsText, textStyle]}>
-                • Native background execution for better reliability
+                • Check URLs every {checkInterval} minutes
               </Text>
+              {autoSyncEnabled && (
+                <Text style={[styles.androidTipsText, textStyle]}>
+                  • Sync new URLs from API every {syncInterval} minutes
+                </Text>
+              )}
               <Text style={[styles.androidTipsText, textStyle]}>
                 • Automatic service restart on failure
               </Text>
@@ -2366,6 +2576,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 24,
     fontWeight: 'bold',
+  },
+  syncIntervalText: {
+    marginTop: 10,
+    fontSize: 14,
+    color: '#2196F3',
+    fontWeight: '600',
   },
 });
 

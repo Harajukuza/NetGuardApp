@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { NativeModules, DeviceEventEmitter, Platform, Alert } from 'react-native';
+import {
+  NativeModules,
+  DeviceEventEmitter,
+  Platform,
+  Alert,
+} from 'react-native';
 
 const { NetGuardBackgroundService } = NativeModules;
 
@@ -36,17 +41,17 @@ export interface BackgroundServiceHook {
   startBackgroundService: (
     urls: URLItem[],
     callbackConfig?: CallbackConfig,
-    intervalMinutes?: number
+    intervalMinutes?: number,
   ) => Promise<boolean>;
   stopBackgroundService: () => Promise<boolean>;
   updateServiceConfig: (
     urls: URLItem[],
     callbackConfig?: CallbackConfig,
-    intervalMinutes?: number
+    intervalMinutes?: number,
   ) => Promise<boolean>;
   performManualCheck: (
     urls: URLItem[],
-    callbackConfig?: CallbackConfig
+    callbackConfig?: CallbackConfig,
   ) => Promise<boolean>;
 
   // Utility functions
@@ -62,7 +67,9 @@ export const useBackgroundService = (): BackgroundServiceHook => {
   const [serviceStats, setServiceStats] = useState<ServiceStats | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isSupported] = useState(Platform.OS === 'android' && !!NetGuardBackgroundService);
+  const [isSupported] = useState(
+    Platform.OS === 'android' && !!NetGuardBackgroundService,
+  );
 
   const eventSubscriptions = useRef<any[]>([]);
 
@@ -79,11 +86,14 @@ export const useBackgroundService = (): BackgroundServiceHook => {
     if (!isSupported) return;
 
     const subscriptions = [
-      DeviceEventEmitter.addListener('onServiceStatsUpdate', (stats: ServiceStats) => {
-        console.log('📊 Service stats updated:', stats);
-        setServiceStats(stats);
-        setIsServiceRunning(stats.isRunning);
-      }),
+      DeviceEventEmitter.addListener(
+        'onServiceStatsUpdate',
+        (stats: ServiceStats) => {
+          console.log('📊 Service stats updated:', stats);
+          setServiceStats(stats);
+          setIsServiceRunning(stats.isRunning);
+        },
+      ),
 
       DeviceEventEmitter.addListener('onServiceStarted', (data: any) => {
         console.log('🟢 Service started:', data);
@@ -121,7 +131,7 @@ export const useBackgroundService = (): BackgroundServiceHook => {
 
   const handleServiceCall = async <T>(
     operation: () => Promise<T>,
-    operationName: string
+    operationName: string,
   ): Promise<T | null> => {
     try {
       setError(null);
@@ -131,7 +141,6 @@ export const useBackgroundService = (): BackgroundServiceHook => {
       console.log(`✅ ${operationName} completed successfully:`, result);
 
       return result;
-
     } catch (err: any) {
       const errorMessage = err.message || `${operationName} failed`;
       console.error(`❌ ${operationName} error:`, err);
@@ -139,11 +148,9 @@ export const useBackgroundService = (): BackgroundServiceHook => {
       setError(errorMessage);
 
       // Show user-friendly error alert
-      Alert.alert(
-        'Service Error',
-        `${operationName} failed: ${errorMessage}`,
-        [{ text: 'OK' }]
-      );
+      Alert.alert('Service Error', `${operationName} failed: ${errorMessage}`, [
+        { text: 'OK' },
+      ]);
 
       return null;
     } finally {
@@ -151,40 +158,44 @@ export const useBackgroundService = (): BackgroundServiceHook => {
     }
   };
 
-  const startBackgroundService = useCallback(async (
-    urls: URLItem[],
-    callbackConfig?: CallbackConfig,
-    intervalMinutes: number = 60
-  ): Promise<boolean> => {
-    if (!isSupported) {
-      setError('Background service not supported on this platform');
-      return false;
-    }
-
-    if (!urls || urls.length === 0) {
-      setError('No URLs provided to monitor');
-      return false;
-    }
-
-    const result = await handleServiceCall(async () => {
-      const serviceResult = await NetGuardBackgroundService.startBackgroundService(
-        urls,
-        callbackConfig || null,
-        intervalMinutes
-      );
-
-      if (serviceResult?.success) {
-        setIsServiceRunning(true);
-        // Refresh status after a short delay
-        setTimeout(refreshServiceStatus, 2000);
-        return true;
-      } else {
-        throw new Error(serviceResult?.message || 'Failed to start service');
+  const startBackgroundService = useCallback(
+    async (
+      urls: URLItem[],
+      callbackConfig?: CallbackConfig,
+      intervalMinutes: number = 60,
+    ): Promise<boolean> => {
+      if (!isSupported) {
+        setError('Background service not supported on this platform');
+        return false;
       }
-    }, 'Start background service');
 
-    return result === true;
-  }, [isSupported]);
+      if (!urls || urls.length === 0) {
+        setError('No URLs provided to monitor');
+        return false;
+      }
+
+      const result = await handleServiceCall(async () => {
+        const serviceResult =
+          await NetGuardBackgroundService.startBackgroundService(
+            urls,
+            callbackConfig || null,
+            intervalMinutes,
+          );
+
+        if (serviceResult?.success) {
+          setIsServiceRunning(true);
+          // Refresh status after a short delay
+          setTimeout(refreshServiceStatus, 2000);
+          return true;
+        } else {
+          throw new Error(serviceResult?.message || 'Failed to start service');
+        }
+      }, 'Start background service');
+
+      return result === true;
+    },
+    [isSupported],
+  );
 
   const stopBackgroundService = useCallback(async (): Promise<boolean> => {
     if (!isSupported) {
@@ -193,7 +204,8 @@ export const useBackgroundService = (): BackgroundServiceHook => {
     }
 
     const result = await handleServiceCall(async () => {
-      const serviceResult = await NetGuardBackgroundService.stopBackgroundService();
+      const serviceResult =
+        await NetGuardBackgroundService.stopBackgroundService();
 
       if (serviceResult?.success) {
         setIsServiceRunning(false);
@@ -207,64 +219,76 @@ export const useBackgroundService = (): BackgroundServiceHook => {
     return result === true;
   }, [isSupported]);
 
-  const updateServiceConfig = useCallback(async (
-    urls: URLItem[],
-    callbackConfig?: CallbackConfig,
-    intervalMinutes: number = 60
-  ): Promise<boolean> => {
-    if (!isSupported) {
-      setError('Background service not supported on this platform');
-      return false;
-    }
-
-    const result = await handleServiceCall(async () => {
-      const serviceResult = await NetGuardBackgroundService.updateServiceConfiguration(
-        urls,
-        callbackConfig || null,
-        intervalMinutes
-      );
-
-      if (serviceResult?.success) {
-        // Refresh status after update
-        setTimeout(refreshServiceStatus, 2000);
-        return true;
-      } else {
-        throw new Error(serviceResult?.message || 'Failed to update service configuration');
+  const updateServiceConfig = useCallback(
+    async (
+      urls: URLItem[],
+      callbackConfig?: CallbackConfig,
+      intervalMinutes: number = 60,
+    ): Promise<boolean> => {
+      if (!isSupported) {
+        setError('Background service not supported on this platform');
+        return false;
       }
-    }, 'Update service configuration');
 
-    return result === true;
-  }, [isSupported]);
+      const result = await handleServiceCall(async () => {
+        const serviceResult =
+          await NetGuardBackgroundService.updateServiceConfiguration(
+            urls,
+            callbackConfig || null,
+            intervalMinutes,
+          );
 
-  const performManualCheck = useCallback(async (
-    urls: URLItem[],
-    callbackConfig?: CallbackConfig
-  ): Promise<boolean> => {
-    if (!isSupported) {
-      setError('Background service not supported on this platform');
-      return false;
-    }
+        if (serviceResult?.success) {
+          // Refresh status after update
+          setTimeout(refreshServiceStatus, 2000);
+          return true;
+        } else {
+          throw new Error(
+            serviceResult?.message || 'Failed to update service configuration',
+          );
+        }
+      }, 'Update service configuration');
 
-    if (!urls || urls.length === 0) {
-      setError('No URLs provided for manual check');
-      return false;
-    }
+      return result === true;
+    },
+    [isSupported],
+  );
 
-    const result = await handleServiceCall(async () => {
-      const serviceResult = await NetGuardBackgroundService.performManualCheck(
-        urls,
-        callbackConfig || null
-      );
-
-      if (serviceResult?.success) {
-        return true;
-      } else {
-        throw new Error(serviceResult?.message || 'Failed to perform manual check');
+  const performManualCheck = useCallback(
+    async (
+      urls: URLItem[],
+      callbackConfig?: CallbackConfig,
+    ): Promise<boolean> => {
+      if (!isSupported) {
+        setError('Background service not supported on this platform');
+        return false;
       }
-    }, 'Perform manual check');
 
-    return result === true;
-  }, [isSupported]);
+      if (!urls || urls.length === 0) {
+        setError('No URLs provided for manual check');
+        return false;
+      }
+
+      const result = await handleServiceCall(async () => {
+        const serviceResult =
+          await NetGuardBackgroundService.performManualCheck(
+            urls,
+            callbackConfig || null,
+          );
+
+        if (serviceResult?.success) {
+          return true;
+        } else {
+          throw new Error(
+            serviceResult?.message || 'Failed to perform manual check',
+          );
+        }
+      }, 'Perform manual check');
+
+      return result === true;
+    },
+    [isSupported],
+  );
 
   const refreshServiceStatus = useCallback(async (): Promise<void> => {
     if (!isSupported) return;
@@ -278,7 +302,6 @@ export const useBackgroundService = (): BackgroundServiceHook => {
         setServiceStats(status);
         setIsServiceRunning(status.isRunning);
       }
-
     } catch (err: any) {
       console.warn('⚠️ Failed to refresh service status:', err.message);
       // Don't show error to user for status refresh failures
@@ -292,12 +315,16 @@ export const useBackgroundService = (): BackgroundServiceHook => {
     }
 
     const result = await handleServiceCall(async () => {
-      const optimizationResult = await NetGuardBackgroundService.requestBatteryOptimizationExemption();
+      const optimizationResult =
+        await NetGuardBackgroundService.requestBatteryOptimizationExemption();
 
       if (optimizationResult?.success) {
         return true;
       } else {
-        throw new Error(optimizationResult?.message || 'Failed to request battery optimization exemption');
+        throw new Error(
+          optimizationResult?.message ||
+            'Failed to request battery optimization exemption',
+        );
       }
     }, 'Request battery optimization exemption');
 

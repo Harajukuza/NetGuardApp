@@ -13,7 +13,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 import BackgroundJob from 'react-native-background-actions';
-import ApiSyncManager, { APIURLItem, apiSyncManager } from './ApiSyncManager';
+import { apiSyncManager, SyncResult } from './ApiSyncManager';
 
 interface URLCheckResult {
   url: string;
@@ -79,8 +79,8 @@ class EnhancedBackgroundService {
   private currentConfig: BackgroundServiceConfig | null = null;
   private stats: BackgroundServiceStats;
   private pendingCallbacks: URLCheckResult[][] = [];
-  private retryTimer: NodeJS.Timeout | null = null;
-  private healthCheckTimer: NodeJS.Timeout | null = null;
+  private healthCheckTimer: any = null;
+  private syncTimer: any = null;
   private lastActivityTime: Date = new Date();
 
   private constructor() {
@@ -195,7 +195,7 @@ class EnhancedBackgroundService {
 
     try {
       await this.stopService();
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise<void>(resolve => setTimeout(() => resolve(), 5000));
       await this.startService(this.currentConfig);
       this.log('Background service restarted successfully');
     } catch (error) {
@@ -221,7 +221,10 @@ class EnhancedBackgroundService {
 
   async startService(config: BackgroundServiceConfig): Promise<boolean> {
     if (!config) {
-      this.log('startService called with a null config. Aborting.', new Error());
+      this.log(
+        'startService called with a null config. Aborting.',
+        new Error(),
+      );
       return false;
     }
 
@@ -229,7 +232,9 @@ class EnhancedBackgroundService {
       this.log('Starting enhanced background service', config);
 
       if (this.isServiceRunning) {
-        await this.stopService();
+        // If service is already running, just update config instead of restarting
+        this.log('Service already running, updating configuration');
+        return await this.updateServiceConfiguration(config);
       }
 
       this.currentConfig = config;
@@ -270,6 +275,52 @@ class EnhancedBackgroundService {
     } catch (error) {
       this.log('Failed to start enhanced background service', error);
       this.isServiceRunning = false;
+      return false;
+    }
+  }
+
+  // Hot-reload configuration without stopping the service
+  async updateServiceConfiguration(
+    newConfig: BackgroundServiceConfig,
+  ): Promise<boolean> {
+    try {
+      this.log('Updating service configuration without restart', {
+        oldUrls: this.currentConfig?.urls.length,
+        newUrls: newConfig.urls.length,
+      });
+
+      // Update configuration
+      this.currentConfig = newConfig;
+
+      // Save updated configuration for persistence
+      await AsyncStorage.setItem(
+        STORAGE_KEYS.SERVICE_CONFIG,
+        JSON.stringify({
+          isRunning: this.isServiceRunning,
+          config: newConfig,
+          startTime: this.serviceStartTime?.getTime() || null,
+          lastActivityTime: this.lastActivityTime.getTime(),
+        }),
+      );
+
+      // Update related storage items for background tasks
+      await AsyncStorage.setItem(
+        '@Enhanced:urls',
+        JSON.stringify(newConfig.urls.map(url => ({ url }))),
+      );
+      await AsyncStorage.setItem(
+        '@Enhanced:callback',
+        JSON.stringify(newConfig.callbackConfig),
+      );
+      await AsyncStorage.setItem(
+        '@Enhanced:lastUsedUrls',
+        JSON.stringify(newConfig.urls.map(url => ({ url }))),
+      );
+
+      this.log('Configuration updated successfully without service restart');
+      return true;
+    } catch (error) {
+      this.log('Failed to update service configuration', error);
       return false;
     }
   }
@@ -326,6 +377,11 @@ class EnhancedBackgroundService {
       return;
     }
 
+    // Use current config if available (for hot-reload support)
+    if (this.currentConfig) {
+      config = this.currentConfig;
+    }
+
     this.log('Background task started with config', config);
 
     const intervalMs = config.intervalMinutes * 60 * 1000;
@@ -378,7 +434,7 @@ class EnhancedBackgroundService {
             uptime: this.getUptime(),
           });
 
-          // Try to send callback
+          // Try to send callback with current config
           const callbackSent = await this.sendCallbackWithRetry(
             checkResults,
             config.callbackConfig,
@@ -925,6 +981,36 @@ class EnhancedBackgroundService {
     return { ...this.stats, uptime: this.getUptime() };
   }
 
+  // Get current configuration
+  getCurrentConfig(): BackgroundServiceConfig | null {
+    return this.currentConfig;
+  }
+
+  // Check if configuration has changed and update if needed
+  async checkAndUpdateConfiguration(): Promise<boolean> {
+    try {
+      // Load latest configuration from storage
+      const stored = await AsyncStorage.getItem('@Enhanced:serviceConfig');
+      if (!stored) return false;
+
+      const newConfig = JSON.parse(stored);
+
+      // Compare with current config
+      if (
+        this.currentConfig &&
+        JSON.stringify(this.currentConfig) !== JSON.stringify(newConfig)
+      ) {
+        this.log('Configuration change detected, updating...');
+        return await this.updateServiceConfiguration(newConfig);
+      }
+
+      return false;
+    } catch (error) {
+      this.log('Error checking configuration updates', error);
+      return false;
+    }
+  }
+
   // Enhanced Background API sync using ApiSyncManager
   private async performBackgroundApiSync() {
     try {
@@ -938,11 +1024,11 @@ class EnhancedBackgroundService {
       }
 
       // Perform sync using ApiSyncManager
-      const result = await apiSyncManager.performManualSync();
+      const result = (await apiSyncManager.performManualSync()) as SyncResult;
 
       if (result.success) {
         this.log(`Background API sync completed: ${result.newCount} URLs`, {
-          previousCount: result.previousCount,
+          previousCount: (result as any).previousCount,
           newCount: result.newCount,
           addedUrls: result.addedUrls.length,
           modifiedUrls: result.modifiedUrls.length,
@@ -951,14 +1037,13 @@ class EnhancedBackgroundService {
           dataChecksum: result.dataChecksum,
         });
 
-        // Store legacy format for backward compatibility
         await AsyncStorage.setItem(
           '@Enhanced:apiDataBackgroundSync',
           JSON.stringify({
             data: { status: 'success', data: result.newData },
             timestamp: result.timestamp,
             source: 'enhanced_background_sync',
-            previousCount: result.previousCount,
+            previousCount: (result as any).previousCount,
             newCount: result.newCount,
             hasNewData: result.addedUrls.length > 0,
             changes: {
@@ -1133,30 +1218,63 @@ class EnhancedBackgroundService {
       const currentUrls = await AsyncStorage.getItem('@Enhanced:urls');
       const currentCount = currentUrls ? JSON.parse(currentUrls).length : 0;
 
+      const controllerHead = new AbortController();
+      const timeoutHeadId = setTimeout(() => controllerHead.abort(), 10000);
+
       // Quick API check to see if count changed
       const response = await fetch(config.apiEndpoint, {
         method: 'HEAD', // Use HEAD to check without downloading full content
-        timeout: 10000,
+        signal: controllerHead.signal,
       });
+
+      clearTimeout(timeoutHeadId);
 
       if (!response.ok) {
         // If HEAD doesn't work, try GET with limited data
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
         const getResponse = await fetch(config.apiEndpoint, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            Range: 'bytes=0-1024', // Try to get just first 1KB
+            Range: 'bytes=0-4096', // Try to get first 4KB
           },
-          timeout: 10000,
+          signal: controller.signal,
         });
 
+        clearTimeout(timeoutId);
+
         if (getResponse.ok) {
-          const data = await getResponse.json();
-          const apiCount = Array.isArray(data)
-            ? data.length
-            : data.data
-            ? data.data.length
-            : 0;
+          const apiResponse = await getResponse.json();
+          let apiData: any[] = [];
+
+          if (Array.isArray(apiResponse)) {
+            apiData = apiResponse;
+          } else if (
+            apiResponse &&
+            apiResponse.status === 'success' &&
+            Array.isArray(apiResponse.data)
+          ) {
+            apiData = apiResponse.data;
+          } else if (apiResponse && Array.isArray(apiResponse.data)) {
+            apiData = apiResponse.data;
+          }
+
+          // Important: filter by currently active callback name if available
+          const activeCallback = this.currentConfig?.callbackConfig?.name;
+          if (activeCallback) {
+            apiData = apiData.filter(
+              item =>
+                String(item.callback_name || item.name || '') ===
+                String(activeCallback),
+            );
+          }
+
+          const uniqueUrls = [
+            ...new Set(apiData.map(item => item.url).filter(url => url)),
+          ];
+          const apiCount = uniqueUrls.length;
           return apiCount !== currentCount;
         }
       }
@@ -1179,29 +1297,29 @@ class EnhancedBackgroundService {
         const currentConfig = this.currentConfig;
 
         if (currentConfig) {
-          // Update URLs list from synced API data
-          const newUrls = result.newData
-            .map(item => item.url)
-            .filter(url => url);
+          // Update URLs list from synced API data and deduplicate
+          const newUrls = [
+            ...new Set(result.newData.map(item => item.url).filter(url => url)),
+          ];
 
-          // Update current configuration
+          // Create updated configuration
           const updatedConfig = {
             ...currentConfig,
             urls: newUrls,
           };
 
-          // Save updated configuration for persistence
-          await AsyncStorage.setItem(
-            '@Enhanced:serviceConfig',
-            JSON.stringify(updatedConfig),
+          // Use hot-reload to update configuration without stopping service
+          const updateSuccess = await this.updateServiceConfiguration(
+            updatedConfig,
           );
 
-          // Update current config in memory
-          this.currentConfig = updatedConfig;
-
-          this.log(
-            `Service configuration updated with ${newUrls.length} URLs from API sync`,
-          );
+          if (updateSuccess) {
+            this.log(
+              `Service configuration hot-reloaded with ${newUrls.length} URLs from API sync`,
+            );
+          } else {
+            this.log('Failed to hot-reload configuration from API sync');
+          }
 
           // Create notification for new URLs
           await AsyncStorage.setItem(
